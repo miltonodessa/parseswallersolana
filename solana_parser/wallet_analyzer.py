@@ -273,7 +273,10 @@ class WalletAnalyzer:
         import time as _time
         since_ts = int(_time.time()) - settings.WALLET_ANALYSIS_DAYS * 86400
         txs = await self.rpc.helius_get_parsed_transactions(
-            [wallet], tx_type="SWAP", since_ts=since_ts
+            [wallet],
+            tx_type="SWAP",
+            since_ts=since_ts,
+            max_pages=getattr(settings, "HELIUS_MAX_PAGES", 2),
         )
         if not txs:
             return stats

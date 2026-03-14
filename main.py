@@ -176,8 +176,8 @@ async def run_parse_tokens(mints: list[str]):
             progress_callback=token_progress,
             min_appearances=settings.MIN_WALLET_APPEARANCES,
         )
-        print(f"\n      Уникальных кошельков: {len(wallets):,}"
-              + (f"  (фильтр ≥{settings.MIN_WALLET_APPEARANCES} токена)" if settings.MIN_WALLET_APPEARANCES > 1 else ""))
+        total_found = len(appearances)
+        _print_wallet_collection_stats(total_found, wallets, settings.MIN_WALLET_APPEARANCES)
 
         if not wallets:
             print("[-] Нет кошельков для анализа.")
@@ -265,8 +265,8 @@ async def run_pump_today(
             progress_callback=token_progress,
             min_appearances=settings.MIN_WALLET_APPEARANCES,
         )
-        print(f"\n      Уникальных кошельков: {len(wallets):,}"
-              + (f"  (фильтр ≥{settings.MIN_WALLET_APPEARANCES} токена)" if settings.MIN_WALLET_APPEARANCES > 1 else ""))
+        total_found = len(appearances)
+        _print_wallet_collection_stats(total_found, wallets, settings.MIN_WALLET_APPEARANCES)
 
         if not wallets:
             print("[-] Нет кошельков для анализа.")
@@ -373,6 +373,18 @@ async def run_dev_wallets(mints: list[str]):
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
+
+def _print_wallet_collection_stats(total_found: int, wallets_after_filter: list, min_appearances: int):
+    after = len(wallets_after_filter)
+    dropped = total_found - after
+    pct = dropped / total_found * 100 if total_found else 0
+    print(f"\n      Всего уникальных кошельков: {total_found:,}")
+    if min_appearances > 1:
+        print(f"      После фильтра (≥{min_appearances} токена): {after:,}  "
+              f"(убрано {dropped:,} = {pct:.0f}% однократных холдеров)")
+    else:
+        print(f"      К анализу: {after:,}")
+
 
 def _progress_bar(done: int, total: int, width: int = 30) -> str:
     pct = done / total if total else 0
