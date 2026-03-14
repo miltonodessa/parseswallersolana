@@ -3,6 +3,7 @@ from .token_parser import TokenParser
 from .wallet_analyzer import WalletAnalyzer, WalletFilters, WalletStats, TokenTrade
 from .cross_traders import CrossTraderFinder
 from .exporter import Exporter
+from .pump_fetcher import fetch_today_tokens, PumpToken
 
 __all__ = [
     "SolanaRPCClient",
@@ -13,4 +14,6 @@ __all__ = [
     "TokenTrade",
     "CrossTraderFinder",
     "Exporter",
+    "fetch_today_tokens",
+    "PumpToken",
 ]

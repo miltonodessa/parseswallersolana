@@ -6,9 +6,11 @@ Solana Smart Wallet Parser
 Настройки и фильтры — в файле settings.py
 
 Команды:
-  parse_token   <MINT>             Парсить кошельки токена
-  cross_traders <MINT> <MINT> ...  Кошельки из нескольких токенов
-  dev_wallets   <MINT> [MINT] ...  Dev-кошельки токенов
+  parse_token   <MINT>               Парсить кошельки одного токена
+  parse_tokens  <MINT> [MINT ...]    Парсить несколько токенов сразу (или --file)
+  pump_today                         Загрузить токены pump.fun созданные сегодня
+  cross_traders <MINT> <MINT> ...    Кошельки из нескольких токенов
+  dev_wallets   <MINT> [MINT] ...    Dev-кошельки токенов
 
 Опции:
   --debug   Подробный лог
@@ -19,35 +21,84 @@ import asyncio
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 
 import settings
 from solana_parser import (
     SolanaRPCClient, TokenParser, WalletAnalyzer, WalletFilters,
     CrossTraderFinder, Exporter,
 )
+from solana_parser.pump_fetcher import fetch_today_tokens, PumpToken
 
 
 # ---------------------------------------------------------------------------
-# parse_token
+# Общий pipeline: wallets → analyze → filter → export
+# ---------------------------------------------------------------------------
+
+async def _analyze_and_export(
+    wallets: list[str],
+    rpc: SolanaRPCClient,
+    prefix: str,
+    label: str = "",
+):
+    """Анализирует список кошельков, применяет фильтры, сохраняет результаты."""
+    analyzer = WalletAnalyzer(rpc)
+    exporter = Exporter()
+    filters  = WalletFilters()
+
+    if label:
+        print(f"[*] Фильтры: {filters.describe()}\n")
+
+    total = len(wallets)
+    print(f"\n[2/3] Анализирую {total} уникальных кошельков...")
+
+    async def progress(done, total_):
+        bar = _progress_bar(done, total_)
+        print(f"\r      {bar}  {done}/{total_}", end="", flush=True)
+
+    all_stats = await analyzer.analyze_wallets_batch(
+        wallets,
+        concurrency=settings.WALLET_CONCURRENCY,
+        progress_callback=progress,
+    )
+    print()
+
+    filtered = [s for s in all_stats if analyzer.passes_filter(s, filters)]
+    filtered.sort(key=lambda x: x.score, reverse=True)
+    print(f"\n[3/3] Смарт-кошельков: {len(filtered)} из {len(all_stats)}")
+
+    if not filtered:
+        print("\n[!] Ни один кошелёк не прошёл фильтры.")
+        _print_filter_diagnostics(all_stats, filters)
+        return
+
+    _print_table(filtered[:settings.TOP_RESULTS])
+
+    csv_path  = exporter.export_wallets_csv(filtered,   f"{prefix}_{len(filtered)}w.csv")
+    txt_path  = exporter.export_wallets_txt(filtered,   f"{prefix}_{len(filtered)}w.txt")
+    xlsx_path = exporter.export_wallets_excel(filtered, f"{prefix}_{len(filtered)}w.xlsx")
+    print(f"\n[+] CSV  : {csv_path}")
+    print(f"[+] TXT  : {txt_path}")
+    print(f"[+] XLSX : {xlsx_path}")
+
+
+# ---------------------------------------------------------------------------
+# parse_token  (один токен)
 # ---------------------------------------------------------------------------
 
 async def run_parse_token(mint: str):
     rpc = SolanaRPCClient()
     try:
-        parser   = TokenParser(rpc)
-        analyzer = WalletAnalyzer(rpc)
-        exporter = Exporter()
-        filters  = WalletFilters()   # читает все значения из settings.py
+        parser  = TokenParser(rpc)
+        filters = WalletFilters()
 
         print(f"\n[*] Токен  : {mint}")
         print(f"[*] Фильтры: {filters.describe()}\n")
 
-        # 1. Холдеры
         print("[1/3] Загружаю холдеров...")
         token_info = await parser.parse_token(mint)
         wallets = [h.wallet for h in token_info.holders if h.wallet]
         print(f"      Найдено: {len(wallets)} кошельков")
-
         if token_info.dev_wallet:
             print(f"      Dev: {token_info.dev_wallet}")
 
@@ -55,41 +106,159 @@ async def run_parse_token(mint: str):
             print("[-] Нет кошельков для анализа.")
             return
 
-        # 2. Анализ
-        print(f"\n[2/3] Анализирую {len(wallets)} кошельков...")
-
-        async def progress(done, total):
-            bar = _progress_bar(done, total)
-            print(f"\r      {bar}  {done}/{total}", end="", flush=True)
-
-        all_stats = await analyzer.analyze_wallets_batch(
-            wallets, concurrency=5, progress_callback=progress
-        )
-        print()
-
-        # 3. Фильтр
-        filtered = [s for s in all_stats if analyzer.passes_filter(s, filters)]
-        filtered.sort(key=lambda x: x.score, reverse=True)
-
-        print(f"\n[3/3] Смарт-кошельков: {len(filtered)} из {len(all_stats)}")
-
-        if not filtered:
-            print("\n[!] Ни один кошелёк не прошёл фильтры.")
-            _print_filter_diagnostics(all_stats, filters)
-            return
-
-        _print_table(filtered[:settings.TOP_RESULTS])
-
-        prefix = f"token_{mint[:8]}"
-        csv_path  = exporter.export_wallets_csv(filtered,   f"{prefix}_{len(filtered)}w.csv")
-        txt_path  = exporter.export_wallets_txt(filtered,   f"{prefix}_{len(filtered)}w.txt")
-        xlsx_path = exporter.export_wallets_excel(filtered, f"{prefix}_{len(filtered)}w.xlsx")
-        print(f"\n[+] CSV  : {csv_path}")
-        print(f"[+] TXT  : {txt_path}")
-        print(f"[+] XLSX : {xlsx_path}")
-
+        await _analyze_and_export(wallets, rpc, prefix=f"token_{mint[:8]}")
     finally:
         await rpc.close()
+
+
+# ---------------------------------------------------------------------------
+# parse_tokens  (много токенов сразу)
+# ---------------------------------------------------------------------------
+
+async def run_parse_tokens(mints: list[str]):
+    rpc = SolanaRPCClient()
+    try:
+        parser  = TokenParser(rpc)
+        filters = WalletFilters()
+
+        print(f"\n[*] Токенов для парсинга: {len(mints)}")
+        print(f"[*] Параллельность токенов: {settings.TOKEN_CONCURRENCY}")
+        print(f"[*] Фильтры: {filters.describe()}\n")
+
+        print(f"[1/3] Собираю холдеров по {len(mints)} токенам...")
+
+        token_done = [0]
+
+        async def token_progress(done, total, mint):
+            token_done[0] = done
+            bar = _progress_bar(done, total)
+            print(f"\r      {bar}  {done}/{total}  [{mint[:8]}...]", end="", flush=True)
+
+        wallets = await parser.collect_unique_wallets(
+            mints,
+            token_concurrency=settings.TOKEN_CONCURRENCY,
+            progress_callback=token_progress,
+        )
+        print(f"\n      Уникальных кошельков: {len(wallets)}")
+
+        if not wallets:
+            print("[-] Нет кошельков для анализа.")
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        await _analyze_and_export(wallets, rpc, prefix=f"tokens_{len(mints)}t_{ts}")
+    finally:
+        await rpc.close()
+
+
+# ---------------------------------------------------------------------------
+# pump_today  (токены pump.fun созданные сегодня)
+# ---------------------------------------------------------------------------
+
+async def run_pump_today(
+    analyze: bool = False,
+    min_usd_mc: float = 0.0,
+    only_graduated: bool = False,
+    max_tokens: int = None,
+):
+    max_tokens = max_tokens or settings.PUMP_MAX_TOKENS_TODAY
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    print(f"\n[*] Загружаю токены pump.fun созданные сегодня ({today_str} UTC)...")
+    if min_usd_mc > 0:
+        print(f"[*] Фильтр: min USD Market Cap = ${min_usd_mc:,.0f}")
+    if only_graduated:
+        print("[*] Фильтр: только graduated (bonding curve complete)")
+    print(f"[*] Макс. токенов: {max_tokens}\n")
+
+    tokens = await fetch_today_tokens(
+        max_tokens=max_tokens,
+        min_usd_market_cap=min_usd_mc,
+        only_graduated=only_graduated,
+    )
+
+    if not tokens:
+        print("[-] Сегодня токенов не найдено (или API недоступен).")
+        return
+
+    print(f"[+] Найдено токенов сегодня: {len(tokens)}\n")
+    _print_pump_table(tokens[:50])
+
+    # Сохранить список токенов в CSV
+    exporter = Exporter()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = _export_pump_tokens_csv(tokens, exporter, f"pump_today_{ts}.csv")
+    print(f"\n[+] CSV токенов: {csv_path}")
+
+    if not analyze:
+        print("\n[i] Для анализа кошельков добавь флаг --analyze")
+        print("    python main.py pump_today --analyze")
+        return
+
+    # Анализировать холдеров всех найденных токенов
+    mints = [t.mint for t in tokens]
+    print(f"\n[*] Запускаю анализ кошельков по {len(mints)} токенам...")
+    rpc = SolanaRPCClient()
+    try:
+        parser = TokenParser(rpc)
+        filters = WalletFilters()
+        print(f"[*] Фильтры: {filters.describe()}\n")
+
+        print(f"[1/3] Собираю холдеров по {len(mints)} токенам...")
+
+        async def token_progress(done, total, mint):
+            bar = _progress_bar(done, total)
+            print(f"\r      {bar}  {done}/{total}  [{mint[:8]}...]", end="", flush=True)
+
+        wallets = await parser.collect_unique_wallets(
+            mints,
+            token_concurrency=settings.TOKEN_CONCURRENCY,
+            progress_callback=token_progress,
+        )
+        print(f"\n      Уникальных кошельков: {len(wallets)}")
+
+        if not wallets:
+            print("[-] Нет кошельков для анализа.")
+            return
+
+        await _analyze_and_export(
+            wallets, rpc,
+            prefix=f"pump_today_{today_str.replace('-', '')}",
+        )
+    finally:
+        await rpc.close()
+
+
+def _print_pump_table(tokens: list[PumpToken]):
+    print(f"  {'#':>4}  {'Symbol':<10} {'Name':<28} {'USD MC':>12}  {'Grad':>5}  {'Mint':<44}")
+    print("  " + "-" * 110)
+    for i, t in enumerate(tokens, 1):
+        grad = "YES" if t.complete else "-"
+        name = t.name[:26] if t.name else "-"
+        sym  = t.symbol[:8] if t.symbol else "-"
+        print(f"  {i:>4}  {sym:<10} {name:<28} ${t.usd_market_cap:>11,.0f}  {grad:>5}  {t.mint}")
+
+
+def _export_pump_tokens_csv(tokens: list[PumpToken], exporter: Exporter, filename: str) -> str:
+    import csv
+    path = exporter._path(filename)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "mint", "symbol", "name", "created_utc",
+            "usd_market_cap", "market_cap_sol", "graduated",
+        ])
+        writer.writeheader()
+        for t in tokens:
+            writer.writerow({
+                "mint":           t.mint,
+                "symbol":         t.symbol,
+                "name":           t.name,
+                "created_utc":    t.created_dt().strftime("%Y-%m-%d %H:%M:%S"),
+                "usd_market_cap": round(t.usd_market_cap, 2),
+                "market_cap_sol": round(t.market_cap, 4),
+                "graduated":      "yes" if t.complete else "no",
+            })
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +286,6 @@ async def run_cross_traders(mints: list[str], min_count: int = 2):
 
         path = exporter.export_cross_traders_csv(traders)
         print(f"\n[+] CSV : {path}")
-
     finally:
         await rpc.close()
 
@@ -147,7 +315,6 @@ async def run_dev_wallets(mints: list[str]):
 
         path = exporter.export_dev_wallets_csv(dev_data)
         print(f"\n[+] CSV : {path}")
-
     finally:
         await rpc.close()
 
@@ -163,21 +330,20 @@ def _progress_bar(done: int, total: int, width: int = 30) -> str:
 
 
 def _print_filter_diagnostics(stats_list, filters):
-    """Показать сводку — сколько кошельков провалило каждый фильтр."""
     if not stats_list:
         return
     total = len(stats_list)
     keys = ["roi", "win_rate", "fast_trades", "smtb", "balance", "tokens_total",
             "trades_per_week", "total_trades"]
     labels = {
-        "roi":            f"ROI ≥ {filters.min_roi}%",
-        "win_rate":       f"WinRate ≥ {filters.min_winrate}%",
-        "fast_trades":    f"FastTrades ≤ {filters.max_fast_trades_pct}%",
-        "smtb":           f"SMTB ≤ {filters.max_smtb_pct}%",
-        "balance":        f"Balance ≥ {filters.min_balance_sol} SOL",
-        "tokens_total":   f"Tokens ≥ {filters.min_tokens_total}",
-        "trades_per_week":f"Частота ≥ {filters.min_trades_per_week}/нед",
-        "total_trades":   f"Сделок ≥ {filters.min_total_trades}",
+        "roi":             f"ROI ≥ {filters.min_roi}%",
+        "win_rate":        f"WinRate ≥ {filters.min_winrate}%",
+        "fast_trades":     f"FastTrades ≤ {filters.max_fast_trades_pct}%",
+        "smtb":            f"SMTB ≤ {filters.max_smtb_pct}%",
+        "balance":         f"Balance ≥ {filters.min_balance_sol} SOL",
+        "tokens_total":    f"Tokens ≥ {filters.min_tokens_total}",
+        "trades_per_week": f"Частота ≥ {filters.min_trades_per_week}/нед",
+        "total_trades":    f"Сделок ≥ {filters.min_total_trades}",
     }
     fail_counts = {k: 0 for k in keys}
     for s in stats_list:
@@ -239,14 +405,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--debug", action="store_true", help="Подробный лог")
     sub = p.add_subparsers(dest="command")
 
-    pt = sub.add_parser("parse_token", help="Парсить кошельки токена")
+    # parse_token — один токен
+    pt = sub.add_parser("parse_token", help="Парсить кошельки одного токена")
     pt.add_argument("mint", help="Mint-адрес токена")
 
+    # parse_tokens — много токенов
+    pts = sub.add_parser("parse_tokens", help="Парсить несколько токенов сразу")
+    pts_src = pts.add_mutually_exclusive_group(required=True)
+    pts_src.add_argument("mints", nargs="*", default=[], metavar="MINT",
+                         help="Mint-адреса через пробел")
+    pts_src.add_argument("--file", metavar="PATH",
+                         help="Файл со списком mint-адресов (по одному на строку)")
+
+    # pump_today — токены pump.fun сегодня
+    pump = sub.add_parser("pump_today", help="Токены pump.fun созданные сегодня")
+    pump.add_argument("--analyze", action="store_true",
+                      help="Анализировать кошельки всех найденных токенов")
+    pump.add_argument("--min-mc", type=float, default=0.0, metavar="USD",
+                      help="Минимальный USD Market Cap (default: 0 = все)")
+    pump.add_argument("--graduated", action="store_true",
+                      help="Только graduated токены (bonding curve complete)")
+    pump.add_argument("--max", type=int, default=None, metavar="N",
+                      help=f"Макс. кол-во токенов (default: {settings.PUMP_MAX_TOKENS_TODAY})")
+
+    # cross_traders
     ct = sub.add_parser("cross_traders", help="Кросс-трейдеры нескольких токенов")
     ct.add_argument("mints", nargs="+", help="Два и более mint-адресов")
     ct.add_argument("--min-count", type=int, default=2, metavar="N",
                     help="Мин. кол-во токенов у кошелька (default: 2)")
 
+    # dev_wallets
     dw = sub.add_parser("dev_wallets", help="Dev-кошельки токенов")
     dw.add_argument("mints", nargs="+", help="Один или более mint-адресов")
 
@@ -265,11 +453,29 @@ def main():
         level=logging.DEBUG if (args.debug or settings.DEBUG) else logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-
     os.makedirs(settings.RESULTS_DIR, exist_ok=True)
 
     if args.command == "parse_token":
         asyncio.run(run_parse_token(args.mint))
+
+    elif args.command == "parse_tokens":
+        mints = list(args.mints)
+        if args.file:
+            with open(args.file, encoding="utf-8") as f:
+                mints = [line.strip() for line in f if line.strip()]
+        if not mints:
+            print("Ошибка: укажи mint-адреса или --file")
+            sys.exit(1)
+        print(f"[*] Загружено {len(mints)} mint-адресов")
+        asyncio.run(run_parse_tokens(mints))
+
+    elif args.command == "pump_today":
+        asyncio.run(run_pump_today(
+            analyze=args.analyze,
+            min_usd_mc=args.min_mc,
+            only_graduated=args.graduated,
+            max_tokens=args.max,
+        ))
 
     elif args.command == "cross_traders":
         if len(args.mints) < 2:

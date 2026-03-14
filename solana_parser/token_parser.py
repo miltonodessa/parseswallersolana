@@ -174,3 +174,46 @@ class TokenParser:
             mint, len(token_info.holders), token_info.dev_wallet
         )
         return token_info
+
+    async def collect_unique_wallets(
+        self,
+        mints: list[str],
+        token_concurrency: int = 5,
+        progress_callback=None,
+    ) -> list[str]:
+        """
+        Parse holders of many tokens in parallel, return deduplicated wallet list.
+
+        Args:
+            mints:              list of token mint addresses
+            token_concurrency:  how many tokens to parse at the same time
+            progress_callback:  async fn(done, total, mint) called after each token
+
+        Returns:
+            Deduplicated list of wallet addresses sorted by first-seen order.
+        """
+        semaphore = asyncio.Semaphore(token_concurrency)
+        seen: dict[str, None] = {}   # ordered-set via insertion-order dict
+        done_count = 0
+        lock = asyncio.Lock()
+
+        async def _parse_one(mint: str):
+            nonlocal done_count
+            async with semaphore:
+                try:
+                    holders = await self.get_token_holders(mint)
+                    async with lock:
+                        for h in holders:
+                            if h.wallet:
+                                seen[h.wallet] = None
+                except Exception as e:
+                    logger.error("collect_unique_wallets token %s: %s", mint, e)
+                finally:
+                    async with lock:
+                        done_count += 1
+                        d = done_count
+                    if progress_callback:
+                        await progress_callback(d, len(mints), mint)
+
+        await asyncio.gather(*[_parse_one(m) for m in mints])
+        return list(seen.keys())
