@@ -1,12 +1,15 @@
 """
-Excel exporter — produces a .xlsx file matching the Froggy v2 spreadsheet structure.
+Excel exporter — один лист "Summary" со всеми кошельками поочерёдно.
 
-Layout:
-  Sheet "Summary"          — one row per wallet, all key metrics
-  Sheet "Wallet_<addr8>"   — one sheet per wallet with:
-      Block A (rows 1-2)   : column headers + wallet summary values
-      Block B (rows 4-16)  : wallet stats + profit distribution table
-      Block C (rows 18+)   : per-token trade breakdown table
+Структура для каждого кошелька (повторяется друг за другом):
+
+  Row R+0  : ── разделитель с адресом кошелька ──────────────────────
+  Row R+1  : заголовки колонок сводной строки
+  Row R+2  : значения сводной строки (Balance, WR, PNL, ROI …)
+  Row R+4  : блок статистики (AVG …) + таблица Profit/Distribution
+  Row R+12 : заголовки таблицы токенов
+  Row R+13+: строки токенов
+  (пустые строки-разделитель перед следующим кошельком)
 """
 
 from __future__ import annotations
@@ -17,10 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from openpyxl import Workbook
-from openpyxl.styles import (
-    Alignment, Border, Font, GradientFill, PatternFill, Side,
-)
-from openpyxl.styles.numbers import FORMAT_PERCENTAGE_00
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .wallet_analyzer import WalletStats, TokenTrade
@@ -29,264 +29,211 @@ import settings
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Colour palette
+# Palette
 # ---------------------------------------------------------------------------
-C_HEADER_BG   = "1F4E79"   # dark blue  — section headers
-C_HEADER_FG   = "FFFFFF"   # white text
-C_SUBHDR_BG   = "2E75B6"   # mid blue   — sub-headers
-C_ALT_ROW     = "EBF3FB"   # light blue — alternating rows
-C_GREEN_DARK  = "00B050"   # ROI > 500%
-C_GREEN_MID   = "92D050"   # ROI 100-500%
-C_GREEN_LIGHT = "C6EFCE"   # ROI 50-100%
-C_YELLOW      = "FFEB9C"   # ROI 0-50%
-C_RED_LIGHT   = "FFCCCC"   # ROI 0 to -50%
-C_RED_DARK    = "FF0000"   # ROI < -50%
-C_ORANGE      = "FF9900"   # fast-trade / smtb warning
-C_NEUTRAL_BG  = "F2F2F2"   # light gray stats block
+C_WALLET_BG   = "1F4E79"  # тёмно-синий  — разделитель кошелька
+C_HEADER_BG   = "2E75B6"  # синий        — заголовки колонок
+C_SUBHDR_BG   = "4472C4"  # средний синий — под-заголовки
+C_STATS_BG    = "D6E4F0"  # очень светло-голубой — блок статистики
+C_NEUTRAL_BG  = "F2F2F2"  # серый        — метки
+C_ALT_ROW     = "EBF3FB"  # строки токенов (чётные)
+C_GREEN_DARK  = "00B050"  # ROI > 500%
+C_GREEN_MID   = "92D050"  # ROI 100-500%
+C_GREEN_LIGHT = "C6EFCE"  # ROI 50-100%
+C_YELLOW      = "FFEB9C"  # ROI 0-50%
+C_RED_LIGHT   = "FFCCCC"  # ROI 0 … -50%
+C_RED_DARK    = "FF0000"  # ROI < -50%
+C_ORANGE      = "FF9900"  # предупреждение (Fast Trades / SMTB)
+C_WHITE       = "FFFFFF"
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _fill(hex_color: str) -> PatternFill:
     return PatternFill("solid", fgColor=hex_color)
 
-
-def _font(bold=False, color="000000", size=11) -> Font:
+def _font(bold=False, color="000000", size=10) -> Font:
     return Font(bold=bold, color=color, size=size)
 
-
 def _center() -> Alignment:
-    return Alignment(horizontal="center", vertical="center", wrap_text=True)
-
+    return Alignment(horizontal="center", vertical="center", wrap_text=False)
 
 def _left() -> Alignment:
-    return Alignment(horizontal="left", vertical="center", wrap_text=True)
+    return Alignment(horizontal="left", vertical="center", wrap_text=False)
 
-
-def _thin_border() -> Border:
+def _thin() -> Border:
     s = Side(style="thin", color="BFBFBF")
     return Border(left=s, right=s, top=s, bottom=s)
 
-
 def _roi_fill(roi: float) -> PatternFill:
-    if roi > 500:   return _fill(C_GREEN_DARK)
-    if roi > 100:   return _fill(C_GREEN_MID)
-    if roi > 50:    return _fill(C_GREEN_LIGHT)
-    if roi >= 0:    return _fill(C_YELLOW)
-    if roi > -50:   return _fill(C_RED_LIGHT)
+    if roi > 500:  return _fill(C_GREEN_DARK)
+    if roi > 100:  return _fill(C_GREEN_MID)
+    if roi > 50:   return _fill(C_GREEN_LIGHT)
+    if roi >= 0:   return _fill(C_YELLOW)
+    if roi > -50:  return _fill(C_RED_LIGHT)
     return _fill(C_RED_DARK)
 
-
 def _roi_font(roi: float) -> Font:
-    if roi > 100 or roi < -50:
-        return _font(bold=True, color="FFFFFF")
-    return _font(bold=True, color="000000")
-
+    dark = roi > 100 or roi < -50
+    return _font(bold=True, color=C_WHITE if dark else "000000")
 
 def _fmt_ts(ts: Optional[int]) -> str:
     if not ts:
         return "-"
     try:
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "-"
 
-
-def _fmt_duration(sec: int) -> str:
+def _fmt_dur(sec: int) -> str:
     if sec <= 0:
         return "-"
-    d, rem = divmod(sec, 86400)
-    h, rem = divmod(rem, 3600)
-    m, s   = divmod(rem, 60)
+    d, r = divmod(sec, 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
     parts = []
     if d: parts.append(f"{d}d")
     if h: parts.append(f"{h}h")
     if m: parts.append(f"{m}m")
-    if not parts: parts.append(f"{s}s")
-    return " ".join(parts)
+    return " ".join(parts) or f"{s}s"
 
+def _set(ws, row, col, value, *, fill=None, font=None, align=None, border=None):
+    """Write cell and apply styles."""
+    cell = ws.cell(row=row, column=col, value=value)
+    if fill:   cell.fill   = fill
+    if font:   cell.font   = font
+    if align:  cell.alignment = align
+    if border: cell.border = border
+    return cell
 
-def _fmt_sol(v: float) -> str:
-    return f"{v:.4f}" if v else "0"
+def _hdr(ws, row, col, value, bg=C_HEADER_BG):
+    return _set(ws, row, col, value,
+                fill=_fill(bg),
+                font=_font(bold=True, color=C_WHITE),
+                align=_center(),
+                border=_thin())
 
+def _lbl(ws, row, col, value):
+    return _set(ws, row, col, value,
+                fill=_fill(C_NEUTRAL_BG),
+                font=_font(bold=True),
+                align=_left(),
+                border=_thin())
 
-def _apply_header_style(cell, bg=C_HEADER_BG):
-    cell.fill  = _fill(bg)
-    cell.font  = _font(bold=True, color=C_HEADER_FG, size=10)
-    cell.alignment = _center()
-    cell.border = _thin_border()
-
-
-def _apply_label_style(cell):
-    cell.fill  = _fill(C_NEUTRAL_BG)
-    cell.font  = _font(bold=True, size=10)
-    cell.alignment = _left()
-    cell.border = _thin_border()
-
-
-def _apply_value_style(cell, bold=False):
-    cell.font  = _font(bold=bold, size=10)
-    cell.alignment = _center()
-    cell.border = _thin_border()
-
+def _val(ws, row, col, value, *, bold=False, fill_hex=None):
+    f = _fill(fill_hex) if fill_hex else _fill(C_WHITE)
+    return _set(ws, row, col, value,
+                fill=f,
+                font=_font(bold=bold),
+                align=_center(),
+                border=_thin())
 
 # ---------------------------------------------------------------------------
-# Profit / Distribution bucket helpers
+# Profit / Distribution buckets
 # ---------------------------------------------------------------------------
 
 _BUCKETS = [
-    (">500%",      lambda r: r > 500),
-    ("500-100%",   lambda r: 100 < r <= 500),
-    ("100-50%",    lambda r: 50  < r <= 100),
-    ("50-0%",      lambda r: 0   < r <= 50),
-    ("0%-50%",     lambda r: -50 < r <= 0),
-    ("-50%-100%",  lambda r: r   <= -50),
+    (">500%",     lambda r: r >  500,   C_GREEN_DARK,  C_WHITE),
+    ("500-100%",  lambda r: 100 < r <= 500, C_GREEN_MID,  "000000"),
+    ("100-50%",   lambda r: 50  < r <= 100, C_GREEN_LIGHT,"000000"),
+    ("50-0%",     lambda r: 0   < r <= 50,  C_YELLOW,     "000000"),
+    ("0%-50%",    lambda r: -50 < r <= 0,   C_RED_LIGHT,  "000000"),
+    ("-50%-100%", lambda r: r  <= -50,   C_RED_DARK,   C_WHITE),
 ]
 
-_BUCKET_FILLS = [
-    _fill(C_GREEN_DARK),
-    _fill(C_GREEN_MID),
-    _fill(C_GREEN_LIGHT),
-    _fill(C_YELLOW),
-    _fill(C_RED_LIGHT),
-    _fill(C_RED_DARK),
+def _bucket_stats(trades: list[TokenTrade]) -> list[dict]:
+    total = len(trades)
+    out = []
+    for label, pred, bg, fg in _BUCKETS:
+        matched = [t for t in trades if pred(t.roi)]
+        count = len(matched)
+        out.append({
+            "label": label,
+            "count": count,
+            "pct":   (count / total * 100) if total else 0.0,
+            "pnl":   sum(t.pnl_sol for t in matched),
+            "bg":    bg,
+            "fg":    fg,
+        })
+    return out
+
+# ---------------------------------------------------------------------------
+# Column layout constants
+# ---------------------------------------------------------------------------
+
+# Summary header row columns
+_SUMMARY_HEADERS = [
+    ("Wallet",          46),
+    ("Balance SOL",     12),
+    ("Winrate %",       11),
+    ("PNL SOL",         11),
+    ("ROI %",           10),
+    ("Spent SOL",       11),
+    ("Earned SOL",      11),
+    ("Fast Trades %",   13),
+    ("SMTB %",          10),
+    ("Tokens",           8),
+    ("Trades/wk",       10),
+    ("Score",            8),
 ]
-_BUCKET_FONTS = [
-    _font(bold=True, color="FFFFFF"),
-    _font(bold=True, color="000000"),
-    _font(bold=True, color="000000"),
-    _font(bold=True, color="000000"),
-    _font(bold=True, color="000000"),
-    _font(bold=True, color="FFFFFF"),
-]
 
-
-def _bucket_stats(token_trades: list[TokenTrade]) -> list[dict]:
-    results = []
-    total = len(token_trades)
-    for label, pred in _BUCKETS:
-        matched = [t for t in token_trades if pred(t.roi)]
-        count   = len(matched)
-        pct     = (count / total * 100) if total else 0
-        pnl     = sum(t.pnl_sol for t in matched)
-        results.append({"label": label, "count": count, "pct": pct, "pnl": pnl})
-    return results
-
-
-# ===========================================================================
-# Summary sheet
-# ===========================================================================
-
-_SUMMARY_COLS = [
-    ("Wallet",           44),
-    ("Balance SOL",      12),
-    ("Winrate %",        11),
-    ("PNL SOL",          11),
+# Token table columns (col A … M)
+_TOKEN_HEADERS = [
+    ("Token / Mint",     46),
+    ("SPL Income",       14),
+    ("SPL Outcome",      14),
+    ("Spent SOL",        12),
+    ("Earned SOL",       12),
+    ("PNL SOL",          12),
     ("ROI %",            10),
-    ("Spent SOL",        11),
-    ("Earned SOL",       11),
-    ("Fast Trades %",    13),
-    ("SMTB %",           10),
-    ("Tokens",            8),
-    ("Trades/wk",        10),
-    ("Score",             8),
+    ("Duration",         12),
+    ("Buys/Sells",       11),
+    ("First Swap",       20),
+    ("Last Swap",        20),
+    ("GMGN",              8),
+    ("Pool",              8),
 ]
 
+N_COLS = len(_TOKEN_HEADERS)   # 13 columns
 
-def _build_summary_sheet(ws, stats_list: list[WalletStats]):
-    ws.title = "Summary"
-    ws.freeze_panes = "A2"
+# ---------------------------------------------------------------------------
+# Set column widths once (from TOKEN_HEADERS which is the widest)
+# ---------------------------------------------------------------------------
 
-    # Column widths
-    for i, (_, w) in enumerate(_SUMMARY_COLS, 1):
+def _set_col_widths(ws):
+    for i, (_, w) in enumerate(_TOKEN_HEADERS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
-    ws.row_dimensions[1].height = 30
+# ---------------------------------------------------------------------------
+# Write one wallet block starting at `start_row`; return next free row
+# ---------------------------------------------------------------------------
 
-    # Header row
-    for col_idx, (label, _) in enumerate(_SUMMARY_COLS, 1):
-        cell = ws.cell(row=1, column=col_idx, value=label)
-        _apply_header_style(cell)
-
-    # Data rows
-    for row_idx, s in enumerate(stats_list, 2):
-        alt = (row_idx % 2 == 0)
-        row_fill = _fill(C_ALT_ROW) if alt else _fill("FFFFFF")
-
-        total_spent  = sum(t.spent_sol  for t in s.token_trades)
-        total_earned = sum(t.earned_sol for t in s.token_trades)
-
-        values = [
-            s.wallet,
-            round(s.sol_balance, 4),
-            round(s.win_rate, 2),
-            round(s.total_pnl_usd, 4),
-            round(s.roi, 2),
-            round(total_spent, 4),
-            round(total_earned, 4),
-            round(s.fast_trades_pct, 2),
-            round(s.smtb_pct, 2),
-            s.tokens_total,
-            round(s.trades_per_week, 2),
-            round(s.score, 2),
-        ]
-
-        for col_idx, val in enumerate(values, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.border = _thin_border()
-            cell.alignment = _center() if col_idx > 1 else _left()
-
-            # Colour ROI column
-            if col_idx == 5:    # ROI %
-                cell.fill = _roi_fill(s.roi)
-                cell.font = _roi_font(s.roi)
-            elif col_idx == 4:  # PNL SOL
-                cell.fill = _fill(C_GREEN_LIGHT) if s.total_pnl_usd >= 0 else _fill(C_RED_LIGHT)
-            elif col_idx in (8, 9):  # Fast Trades, SMTB — warn if high
-                cell.fill = _fill(C_ORANGE) if (
-                    (col_idx == 8 and s.fast_trades_pct > settings.MAX_FAST_TRADES_PCT) or
-                    (col_idx == 9 and s.smtb_pct > settings.MAX_SMTB_PCT)
-                ) else row_fill
-            else:
-                cell.fill = row_fill
-
-
-# ===========================================================================
-# Individual wallet sheet
-# ===========================================================================
-
-def _build_wallet_sheet(wb: Workbook, s: WalletStats):
-    sheet_name = f"Wallet_{s.wallet[:8]}"
-    ws = wb.create_sheet(title=sheet_name)
-    ws.freeze_panes = "A3"
-
+def _write_wallet_block(ws, s: WalletStats, start_row: int) -> int:
+    r = start_row
     total_spent  = sum(t.spent_sol  for t in s.token_trades)
     total_earned = sum(t.earned_sol for t in s.token_trades)
     avg_buys  = (sum(t.buys  for t in s.token_trades) / len(s.token_trades)) if s.token_trades else 0
     avg_sells = (sum(t.sells for t in s.token_trades) / len(s.token_trades)) if s.token_trades else 0
 
-    # ---- Column widths ----
-    col_widths = {
-        "A": 46, "B": 16, "C": 16, "D": 12,
-        "E": 12, "F": 12, "G": 12, "H": 14,
-        "I": 16, "J": 22, "K": 22, "L": 10, "M": 10,
-    }
-    for col, w in col_widths.items():
-        ws.column_dimensions[col].width = w
+    # ── Row r: wallet address divider bar ───────────────────────────────
+    ws.row_dimensions[r].height = 22
+    cell = ws.cell(row=r, column=1, value=f"  {s.wallet}")
+    cell.fill      = _fill(C_WALLET_BG)
+    cell.font      = _font(bold=True, color=C_WHITE, size=11)
+    cell.alignment = _left()
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=N_COLS)
+    r += 1
 
-    # ==================================================================
-    # BLOCK A — Row 1: column headers   Row 2: wallet summary values
-    # ==================================================================
+    # ── Row r: summary column headers ───────────────────────────────────
+    ws.row_dimensions[r].height = 24
+    for ci, (label, _) in enumerate(_SUMMARY_HEADERS, 1):
+        _hdr(ws, r, ci, label)
+    r += 1
 
-    hdr_labels = [
-        "Wallet", "Balance SOL", "Winrate %", "PNL SOL", "ROI %",
-        "Spent SOL", "Earned SOL", "Fast Trades %", "SMTB %",
-        "Holding pos.", "Median Sell %", "Median Trade", "Score",
-    ]
-    for col_idx, label in enumerate(hdr_labels, 1):
-        cell = ws.cell(row=1, column=col_idx, value=label)
-        _apply_header_style(cell)
-    ws.row_dimensions[1].height = 28
-
-    summary_vals = [
+    # ── Row r: summary values ────────────────────────────────────────────
+    ws.row_dimensions[r].height = 18
+    vals = [
         s.wallet,
         round(s.sol_balance, 4),
         round(s.win_rate, 2),
@@ -296,211 +243,182 @@ def _build_wallet_sheet(wb: Workbook, s: WalletStats):
         round(total_earned, 4),
         round(s.fast_trades_pct, 2),
         round(s.smtb_pct, 2),
-        "-",                           # Holding positions — not available
-        "-",                           # Median Sell %     — not available
-        round(s.avg_trade_size_sol, 6),
+        s.tokens_total,
+        round(s.trades_per_week, 2),
         round(s.score, 2),
     ]
-    for col_idx, val in enumerate(summary_vals, 1):
-        cell = ws.cell(row=2, column=col_idx, value=val)
-        cell.border    = _thin_border()
-        cell.alignment = _center() if col_idx > 1 else _left()
-        cell.font      = _font(bold=(col_idx == 1), size=10)
-
-        if col_idx == 5:   # ROI
-            cell.fill = _roi_fill(s.roi)
-            cell.font = _roi_font(s.roi)
-        elif col_idx == 4:  # PNL
+    for ci, v in enumerate(vals, 1):
+        cell = ws.cell(row=r, column=ci, value=v)
+        cell.border    = _thin()
+        cell.alignment = _center() if ci > 1 else _left()
+        cell.font      = _font(bold=(ci == 1))
+        if ci == 5:    # ROI
+            cell.fill = _roi_fill(s.roi);  cell.font = _roi_font(s.roi)
+        elif ci == 4:  # PNL
             cell.fill = _fill(C_GREEN_LIGHT) if s.total_pnl_usd >= 0 else _fill(C_RED_LIGHT)
-        elif col_idx == 8:  # Fast Trades
-            cell.fill = _fill(C_ORANGE) if s.fast_trades_pct > settings.MAX_FAST_TRADES_PCT else _fill("FFFFFF")
-        elif col_idx == 9:  # SMTB
-            cell.fill = _fill(C_ORANGE) if s.smtb_pct > settings.MAX_SMTB_PCT else _fill("FFFFFF")
-    ws.row_dimensions[2].height = 22
+        elif ci == 8:  # Fast Trades
+            cell.fill = _fill(C_ORANGE) if s.fast_trades_pct > settings.MAX_FAST_TRADES_PCT else _fill(C_WHITE)
+        elif ci == 9:  # SMTB
+            cell.fill = _fill(C_ORANGE) if s.smtb_pct > settings.MAX_SMTB_PCT else _fill(C_WHITE)
+        else:
+            cell.fill = _fill(C_WHITE)
+    r += 1
 
-    # ==================================================================
-    # BLOCK B — Rows 4-16: stats panel + profit distribution table
-    # ==================================================================
+    # ── blank row ────────────────────────────────────────────────────────
+    r += 1
 
-    # Left stats panel (col A-B)
+    # ── Rows r…r+6: stats panel (col A-B) + Profit/Distribution (col D-J) ──
     stats_panel = [
-        ("AVG Trade Duration",   _fmt_duration(
+        ("AVG Trade Duration", _fmt_dur(
             int((s.last_trade_ts - s.first_trade_ts) / max(s.total_trades, 1))
             if s.first_trade_ts and s.last_trade_ts else 0)),
-        ("AVG Buys",             round(avg_buys, 1)),
-        ("AVG Sells",            round(avg_sells, 1)),
-        ("AVG ROI %",            round(s.roi, 2)),
-        ("Winrate %",            round(s.win_rate, 2)),
-        ("SMTB SPL %",           round(s.smtb_pct, 2)),
-        ("Fast Trades %",        round(s.fast_trades_pct, 2)),
-        ("Balance SOL",          round(s.sol_balance, 4)),
-        ("Tokens",               s.tokens_total),
-        ("Trades/week",          round(s.trades_per_week, 2)),
-        ("First Swap",           _fmt_ts(s.first_trade_ts)),
-        ("Last Swap",            _fmt_ts(s.last_trade_ts)),
-        ("Score",                round(s.score, 2)),
+        ("AVG Buys",           round(avg_buys, 1)),
+        ("AVG Sells",          round(avg_sells, 1)),
+        ("AVG ROI %",          round(s.roi, 2)),
+        ("Winrate %",          round(s.win_rate, 2)),
+        ("SMTB SPL %",         round(s.smtb_pct, 2)),
+        ("Fast Trades %",      round(s.fast_trades_pct, 2)),
+        ("Balance SOL",        round(s.sol_balance, 4)),
+        ("Trades / week",      round(s.trades_per_week, 2)),
+        ("First Swap",         _fmt_ts(s.first_trade_ts)),
+        ("Last Swap",          _fmt_ts(s.last_trade_ts)),
+        ("Total Trades",       s.total_trades),
     ]
-    for i, (label, value) in enumerate(stats_panel):
-        row = 4 + i
-        lc  = ws.cell(row=row, column=1, value=label)
-        vc  = ws.cell(row=row, column=2, value=value)
-        _apply_label_style(lc)
-        _apply_value_style(vc)
-        # Highlight warning values
-        if label in ("SMTB SPL %",) and isinstance(value, float) and value > settings.MAX_SMTB_PCT:
+    stats_start = r
+    for i, (lbl, v) in enumerate(stats_panel):
+        row = stats_start + i
+        ws.row_dimensions[row].height = 17
+        lc = _lbl(ws, row, 1, lbl)
+        vc = _val(ws, row, 2, v)
+        # warn colours
+        if lbl == "SMTB SPL %" and isinstance(v, float) and v > settings.MAX_SMTB_PCT:
             vc.fill = _fill(C_ORANGE)
-        if label in ("Fast Trades %",) and isinstance(value, float) and value > settings.MAX_FAST_TRADES_PCT:
+        if lbl == "Fast Trades %" and isinstance(v, float) and v > settings.MAX_FAST_TRADES_PCT:
             vc.fill = _fill(C_ORANGE)
 
-    # Profit / Distribution sub-header (col E, row 4)
-    pd_title = ws.cell(row=4, column=5, value="Profit / Distribution")
-    _apply_header_style(pd_title, bg=C_SUBHDR_BG)
-    ws.merge_cells(start_row=4, start_column=5, end_row=4, end_column=10)
+    # Profit/Distribution table sits in columns D(4)…J(10), starting at stats_start
+    pd_row = stats_start
 
-    # Distribution bucket headers (row 5, cols E-J)
+    # Title
+    tc = ws.cell(row=pd_row, column=4, value="Profit / Distribution")
+    tc.fill = _fill(C_SUBHDR_BG); tc.font = _font(bold=True, color=C_WHITE)
+    tc.alignment = _center(); tc.border = _thin()
+    ws.merge_cells(start_row=pd_row, start_column=4, end_row=pd_row, end_column=9)
+    pd_row += 1
+
+    # Bucket headers
     bucket_stats = _bucket_stats(s.token_trades)
-    for bi, (bstat, bfill, bfont) in enumerate(zip(bucket_stats, _BUCKET_FILLS, _BUCKET_FONTS)):
-        col = 5 + bi
-        hc = ws.cell(row=5, column=col, value=bstat["label"])
-        hc.fill  = bfill
-        hc.font  = bfont
-        hc.alignment = _center()
-        hc.border    = _thin_border()
+    ws.row_dimensions[pd_row].height = 20
+    for bi, b in enumerate(bucket_stats):
+        cell = ws.cell(row=pd_row, column=4 + bi, value=b["label"])
+        cell.fill = _fill(b["bg"]); cell.font = _font(bold=True, color=b["fg"])
+        cell.alignment = _center(); cell.border = _thin()
+    pd_row += 1
 
-    # Row 6: Count
-    ws.cell(row=6, column=4, value="Count").fill = _fill(C_NEUTRAL_BG)
-    ws["D6"].font = _font(bold=True, size=10); ws["D6"].border = _thin_border(); ws["D6"].alignment = _center()
-    for bi, bstat in enumerate(bucket_stats):
-        cell = ws.cell(row=6, column=5 + bi, value=bstat["count"])
-        _apply_value_style(cell)
+    # Count
+    _lbl(ws, pd_row, 3, "Count")
+    for bi, b in enumerate(bucket_stats):
+        _val(ws, pd_row, 4 + bi, b["count"])
+    pd_row += 1
 
-    # Row 7: Percent %
-    ws.cell(row=7, column=4, value="Percent %").fill = _fill(C_NEUTRAL_BG)
-    ws["D7"].font = _font(bold=True, size=10); ws["D7"].border = _thin_border(); ws["D7"].alignment = _center()
-    for bi, bstat in enumerate(bucket_stats):
-        cell = ws.cell(row=7, column=5 + bi, value=round(bstat["pct"], 2))
-        _apply_value_style(cell)
+    # Percent %
+    _lbl(ws, pd_row, 3, "Percent %")
+    for bi, b in enumerate(bucket_stats):
+        _val(ws, pd_row, 4 + bi, round(b["pct"], 2))
+    pd_row += 1
 
-    # Row 8: PnL SOL
-    ws.cell(row=8, column=4, value="PnL (SOL)").fill = _fill(C_NEUTRAL_BG)
-    ws["D8"].font = _font(bold=True, size=10); ws["D8"].border = _thin_border(); ws["D8"].alignment = _center()
-    for bi, bstat in enumerate(bucket_stats):
-        cell = ws.cell(row=8, column=5 + bi, value=round(bstat["pnl"], 4))
-        _apply_value_style(cell)
-        cell.fill = _fill(C_GREEN_LIGHT) if bstat["pnl"] >= 0 else _fill(C_RED_LIGHT)
+    # PnL SOL
+    _lbl(ws, pd_row, 3, "PnL SOL")
+    for bi, b in enumerate(bucket_stats):
+        cell = _val(ws, pd_row, 4 + bi, round(b["pnl"], 4))
+        cell.fill = _fill(C_GREEN_LIGHT) if b["pnl"] >= 0 else _fill(C_RED_LIGHT)
+    pd_row += 1
 
-    # ==================================================================
-    # BLOCK C — Token breakdown table
-    # ==================================================================
+    # Advance r past the taller of stats_panel vs PD table
+    r = max(stats_start + len(stats_panel), pd_row) + 1
 
-    TOKEN_HDR_ROW = 12
-    TOKEN_DATA_START = TOKEN_HDR_ROW + 1
+    # ── Token table header ───────────────────────────────────────────────
+    ws.row_dimensions[r].height = 24
+    for ci, (label, _) in enumerate(_TOKEN_HEADERS, 1):
+        _hdr(ws, r, ci, label, bg=C_SUBHDR_BG)
+    r += 1
 
-    token_headers = [
-        ("Token Name / Mint",  "A"),
-        ("SPL Income",         "B"),
-        ("SPL Outcome",        "C"),
-        ("Spent SOL",          "D"),
-        ("Earned SOL",         "E"),
-        ("PNL SOL",            "F"),
-        ("ROI %",              "G"),
-        ("Duration",           "H"),
-        ("Buys/Sells",         "I"),
-        ("First Swap",         "J"),
-        ("Last Swap",          "K"),
-        ("GMGN",               "L"),
-        ("Pool",               "M"),
-    ]
-
-    ws.row_dimensions[TOKEN_HDR_ROW].height = 28
-    for col_idx, (label, _) in enumerate(token_headers, 1):
-        cell = ws.cell(row=TOKEN_HDR_ROW, column=col_idx, value=label)
-        _apply_header_style(cell)
-
+    # ── Token rows ───────────────────────────────────────────────────────
     if not s.token_trades:
-        ws.cell(row=TOKEN_DATA_START, column=1, value="Нет данных по токенам")
-        return
+        ws.cell(row=r, column=1, value="Нет данных по токенам").font = _font(bold=True)
+        r += 1
+    else:
+        for ti, t in enumerate(s.token_trades):
+            ws.row_dimensions[r].height = 17
+            row_bg = C_ALT_ROW if ti % 2 == 0 else C_WHITE
 
-    for row_offset, t in enumerate(s.token_trades):
-        row = TOKEN_DATA_START + row_offset
-        alt = (row_offset % 2 == 0)
-        row_fill = _fill(C_ALT_ROW) if alt else _fill("FFFFFF")
-        ws.row_dimensions[row].height = 18
+            # A: symbol or mint (short)
+            name = t.symbol if t.symbol else t.mint[:16]
+            ca = ws.cell(row=r, column=1, value=name)
+            ca.fill = _fill(row_bg); ca.border = _thin(); ca.alignment = _left()
+            ca.font = _font(size=10)
 
-        # A: mint (short) + symbol
-        name_str = f"{t.symbol or t.mint[:12]}"
-        ca = ws.cell(row=row, column=1, value=name_str)
-        ca.fill = row_fill; ca.border = _thin_border(); ca.alignment = _left()
+            # B: SPL Income (token units — not tracked, show "—")
+            _val(ws, r, 2, "—", fill_hex=row_bg)
 
-        # B: SPL Income (token units — shown as "—" since we track SOL)
-        cb = ws.cell(row=row, column=2, value="-")
-        cb.fill = row_fill; cb.border = _thin_border(); cb.alignment = _center()
+            # C: SPL Outcome
+            _val(ws, r, 3, "—", fill_hex=row_bg)
 
-        # C: SPL Outcome
-        cc = ws.cell(row=row, column=3, value="-")
-        cc.fill = row_fill; cc.border = _thin_border(); cc.alignment = _center()
+            # D: Spent SOL
+            _val(ws, r, 4, round(t.spent_sol, 4), fill_hex=row_bg)
 
-        # D: Spent SOL
-        cd = ws.cell(row=row, column=4, value=round(t.spent_sol, 4))
-        cd.fill = row_fill; cd.border = _thin_border(); cd.alignment = _center()
+            # E: Earned SOL
+            _val(ws, r, 5, round(t.earned_sol, 4), fill_hex=row_bg)
 
-        # E: Earned SOL
-        ce = ws.cell(row=row, column=5, value=round(t.earned_sol, 4))
-        ce.fill = row_fill; ce.border = _thin_border(); ce.alignment = _center()
+            # F: PNL SOL — coloured
+            cf = ws.cell(row=r, column=6, value=round(t.pnl_sol, 4))
+            cf.fill = _fill(C_GREEN_LIGHT) if t.pnl_sol >= 0 else _fill(C_RED_LIGHT)
+            cf.font = _font(bold=True); cf.border = _thin(); cf.alignment = _center()
 
-        # F: PNL SOL — coloured
-        cf = ws.cell(row=row, column=6, value=round(t.pnl_sol, 4))
-        cf.fill = _fill(C_GREEN_LIGHT) if t.pnl_sol >= 0 else _fill(C_RED_LIGHT)
-        cf.font = _font(bold=True)
-        cf.border = _thin_border(); cf.alignment = _center()
+            # G: ROI % — coloured
+            cg = ws.cell(row=r, column=7, value=round(t.roi, 2))
+            cg.fill = _roi_fill(t.roi); cg.font = _roi_font(t.roi)
+            cg.border = _thin(); cg.alignment = _center()
 
-        # G: ROI % — coloured
-        cg = ws.cell(row=row, column=7, value=round(t.roi, 2))
-        cg.fill = _roi_fill(t.roi)
-        cg.font = _roi_font(t.roi)
-        cg.border = _thin_border(); cg.alignment = _center()
+            # H: Duration
+            _val(ws, r, 8, _fmt_dur(t.duration_sec), fill_hex=row_bg)
 
-        # H: Duration
-        ch = ws.cell(row=row, column=8, value=_fmt_duration(t.duration_sec))
-        ch.fill = row_fill; ch.border = _thin_border(); ch.alignment = _center()
+            # I: Buys/Sells
+            _val(ws, r, 9, f"{t.buys}/{t.sells}", fill_hex=row_bg)
 
-        # I: Buys / Sells
-        ci = ws.cell(row=row, column=9, value=f"{t.buys}/{t.sells}")
-        ci.fill = row_fill; ci.border = _thin_border(); ci.alignment = _center()
+            # J: First Swap
+            _val(ws, r, 10, _fmt_ts(t.first_swap_ts), fill_hex=row_bg)
 
-        # J: First Swap
-        cj = ws.cell(row=row, column=10, value=_fmt_ts(t.first_swap_ts))
-        cj.fill = row_fill; cj.border = _thin_border(); cj.alignment = _center()
+            # K: Last Swap
+            _val(ws, r, 11, _fmt_ts(t.last_swap_ts), fill_hex=row_bg)
 
-        # K: Last Swap
-        ck = ws.cell(row=row, column=11, value=_fmt_ts(t.last_swap_ts))
-        ck.fill = row_fill; ck.border = _thin_border(); ck.alignment = _center()
+            # L: GMGN link
+            cl = ws.cell(row=r, column=12, value="GMGN")
+            cl.hyperlink = f"https://gmgn.ai/sol/token/{t.mint}"
+            cl.font = Font(color="0070C0", underline="single", size=10)
+            cl.fill = _fill(row_bg); cl.border = _thin(); cl.alignment = _center()
 
-        # L: GMGN link
-        gmgn_url = f"https://gmgn.ai/sol/token/{t.mint}"
-        cl = ws.cell(row=row, column=12, value="Link")
-        cl.hyperlink = gmgn_url
-        cl.font = Font(color="0070C0", underline="single", size=10)
-        cl.fill = row_fill; cl.border = _thin_border(); cl.alignment = _center()
+            # M: Birdeye link
+            cm = ws.cell(row=r, column=13, value="Birdeye")
+            cm.hyperlink = f"https://birdeye.so/token/{t.mint}?chain=solana"
+            cm.font = Font(color="0070C0", underline="single", size=10)
+            cm.fill = _fill(row_bg); cm.border = _thin(); cm.alignment = _center()
 
-        # M: Pool (Birdeye)
-        birdeye_url = f"https://birdeye.so/token/{t.mint}?chain=solana"
-        cm = ws.cell(row=row, column=13, value="Link")
-        cm.hyperlink = birdeye_url
-        cm.font = Font(color="0070C0", underline="single", size=10)
-        cm.fill = row_fill; cm.border = _thin_border(); cm.alignment = _center()
+            r += 1
 
+    # ── 3 blank rows before next wallet ─────────────────────────────────
+    r += 3
+    return r
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # Public entry point
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 def export_wallets_excel(
     stats_list: list[WalletStats],
     results_dir: str = None,
     filename: str = "",
 ) -> str:
-    from datetime import datetime
     results_dir = results_dir or settings.RESULTS_DIR
     os.makedirs(results_dir, exist_ok=True)
 
@@ -511,17 +429,19 @@ def export_wallets_excel(
     path = os.path.join(results_dir, filename)
 
     wb = Workbook()
-    # Summary sheet (default sheet)
-    ws_summary = wb.active
-    _build_summary_sheet(ws_summary, stats_list)
+    ws = wb.active
+    ws.title = "Summary"
+    ws.freeze_panes = "A1"
 
-    # Per-wallet sheets
+    _set_col_widths(ws)
+
+    current_row = 1
     for s in stats_list:
         try:
-            _build_wallet_sheet(wb, s)
+            current_row = _write_wallet_block(ws, s, current_row)
         except Exception as e:
-            logger.error("Failed to build sheet for %s: %s", s.wallet, e)
+            logger.error("Failed to write wallet %s: %s", s.wallet, e)
 
     wb.save(path)
-    logger.info("Saved Excel to %s", path)
+    logger.info("Saved Excel → %s (%d wallets)", path, len(stats_list))
     return path
