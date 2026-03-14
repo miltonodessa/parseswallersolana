@@ -5,13 +5,15 @@ from typing import Any, Optional
 
 import aiohttp
 
-from config import SOLANA_RPC_URL, HELIUS_API_KEY, HELIUS_BASE_URL, BIRDEYE_API_KEY, BIRDEYE_BASE_URL
+import settings
+from config import HELIUS_BASE_URL, BIRDEYE_BASE_URL
 
 logger = logging.getLogger(__name__)
 
 
 class SolanaRPCClient:
-    def __init__(self, rpc_url: str = SOLANA_RPC_URL):
+    def __init__(self, rpc_url: str = None):
+        rpc_url = rpc_url or settings.SOLANA_RPC_URL
         self.rpc_url = rpc_url
         self._session: Optional[aiohttp.ClientSession] = None
         self._id = 0
@@ -106,10 +108,10 @@ class SolanaRPCClient:
 
     async def helius_get_token_holders(self, mint: str, page: int = 1) -> dict:
         """Use Helius getTokenAccounts to list all holders."""
-        if not HELIUS_API_KEY:
+        if not settings.HELIUS_API_KEY:
             return {}
         session = await self._get_session()
-        url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+        url = f"https://mainnet.helius-rpc.com/?api-key={settings.HELIUS_API_KEY}"
         payload = {
             "jsonrpc": "2.0",
             "id": self._id,
@@ -128,10 +130,10 @@ class SolanaRPCClient:
         self, addresses: list[str], tx_type: str = "SWAP"
     ) -> list[dict]:
         """Fetch enriched transaction history via Helius."""
-        if not HELIUS_API_KEY:
+        if not settings.HELIUS_API_KEY:
             return []
         session = await self._get_session()
-        url = f"{HELIUS_BASE_URL}/addresses/{','.join(addresses)}/transactions?api-key={HELIUS_API_KEY}&type={tx_type}&limit=100"
+        url = f"{HELIUS_BASE_URL}/addresses/{','.join(addresses)}/transactions?api-key={settings.HELIUS_API_KEY}&type={tx_type}&limit=100"
         try:
             async with session.get(url) as resp:
                 if resp.status == 200:
@@ -146,11 +148,11 @@ class SolanaRPCClient:
     # ------------------------------------------------------------------
 
     async def birdeye_wallet_portfolio(self, wallet: str) -> dict:
-        if not BIRDEYE_API_KEY:
+        if not settings.BIRDEYE_API_KEY:
             return {}
         session = await self._get_session()
         url = f"{BIRDEYE_BASE_URL}/v1/wallet/token_list?wallet={wallet}"
-        headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
+        headers = {"X-API-KEY": settings.BIRDEYE_API_KEY, "x-chain": "solana"}
         try:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
@@ -162,11 +164,11 @@ class SolanaRPCClient:
             return {}
 
     async def birdeye_wallet_gains(self, wallet: str) -> dict:
-        if not BIRDEYE_API_KEY:
+        if not settings.BIRDEYE_API_KEY:
             return {}
         session = await self._get_session()
         url = f"{BIRDEYE_BASE_URL}/v1/wallet/gain?wallet={wallet}"
-        headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
+        headers = {"X-API-KEY": settings.BIRDEYE_API_KEY, "x-chain": "solana"}
         try:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
@@ -178,11 +180,11 @@ class SolanaRPCClient:
             return {}
 
     async def birdeye_token_overview(self, mint: str) -> dict:
-        if not BIRDEYE_API_KEY:
+        if not settings.BIRDEYE_API_KEY:
             return {}
         session = await self._get_session()
         url = f"{BIRDEYE_BASE_URL}/defi/token_overview?address={mint}"
-        headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
+        headers = {"X-API-KEY": settings.BIRDEYE_API_KEY, "x-chain": "solana"}
         try:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:

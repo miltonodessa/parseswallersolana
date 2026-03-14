@@ -19,19 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import settings
 from .rpc_client import SolanaRPCClient
-from config import (
-    HELIUS_API_KEY,
-    BIRDEYE_API_KEY,
-    FILTER_MIN_ROI,
-    FILTER_MIN_WINRATE,
-    FILTER_MAX_FAST_TRADES_PCT,
-    FILTER_MAX_SMTB_PCT,
-    FILTER_MIN_BALANCE_SOL,
-    FILTER_MIN_TOKENS_TOTAL,
-    FILTER_MIN_TRADES_PER_WEEK,
-    FILTER_MIN_TOTAL_TRADES,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -102,14 +91,24 @@ class WalletStats:
 @dataclass
 class WalletFilters:
     """All Froggy v2 filter parameters — fully configurable."""
-    min_roi: float = FILTER_MIN_ROI
-    min_winrate: float = FILTER_MIN_WINRATE
-    max_fast_trades_pct: float = FILTER_MAX_FAST_TRADES_PCT
-    max_smtb_pct: float = FILTER_MAX_SMTB_PCT
-    min_balance_sol: float = FILTER_MIN_BALANCE_SOL
-    min_tokens_total: int = FILTER_MIN_TOKENS_TOTAL
-    min_trades_per_week: float = FILTER_MIN_TRADES_PER_WEEK
-    min_total_trades: int = FILTER_MIN_TOTAL_TRADES
+    min_roi: float = None
+    min_winrate: float = None
+    max_fast_trades_pct: float = None
+    max_smtb_pct: float = None
+    min_balance_sol: float = None
+    min_tokens_total: int = None
+    min_trades_per_week: float = None
+    min_total_trades: int = None
+
+    def __post_init__(self):
+        if self.min_roi is None:           self.min_roi = settings.MIN_ROI
+        if self.min_winrate is None:       self.min_winrate = settings.MIN_WINRATE
+        if self.max_fast_trades_pct is None: self.max_fast_trades_pct = settings.MAX_FAST_TRADES_PCT
+        if self.max_smtb_pct is None:      self.max_smtb_pct = settings.MAX_SMTB_PCT
+        if self.min_balance_sol is None:   self.min_balance_sol = settings.MIN_BALANCE_SOL
+        if self.min_tokens_total is None:  self.min_tokens_total = settings.MIN_TOKENS_TOTAL
+        if self.min_trades_per_week is None: self.min_trades_per_week = settings.MIN_TRADES_PER_WEEK
+        if self.min_total_trades is None:  self.min_total_trades = settings.MIN_TOTAL_TRADES
 
     def describe(self) -> str:
         return (
@@ -131,12 +130,12 @@ class WalletAnalyzer:
     async def analyze_wallet(self, wallet: str) -> WalletStats:
         stats = WalletStats(wallet=wallet)
 
-        if BIRDEYE_API_KEY:
+        if settings.BIRDEYE_API_KEY:
             stats = await self._fill_from_birdeye(wallet, stats)
 
-        if HELIUS_API_KEY:
+        if settings.HELIUS_API_KEY:
             stats = await self._fill_from_helius(wallet, stats)
-        elif not BIRDEYE_API_KEY:
+        elif not settings.BIRDEYE_API_KEY:
             stats = await self._fill_from_rpc(wallet, stats)
 
         # SOL balance (try both APIs)
@@ -358,7 +357,7 @@ class WalletAnalyzer:
         Composite smart-wallet score 0–100.
         Weights mirror Froggy v2 priority: WR > ROI > balance > frequency > tokens.
         """
-        if stats.total_trades < FILTER_MIN_TOTAL_TRADES:
+        if stats.total_trades < settings.MIN_TOTAL_TRADES:
             return 0.0
 
         wr_score    = min(stats.win_rate, 100) * 0.30

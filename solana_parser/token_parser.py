@@ -4,8 +4,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+import settings
 from .rpc_client import SolanaRPCClient
-from config import MAX_HOLDERS_TO_PARSE, HELIUS_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +42,19 @@ class TokenParser:
             info.decimals = supply_data.get("decimals", 6)
             info.supply = float(supply_data.get("uiAmount", 0) or 0)
 
-        if HELIUS_API_KEY:
+        if settings.HELIUS_API_KEY:
             overview = await self.rpc.birdeye_token_overview(mint)
             info.name = overview.get("name", "")
             info.symbol = overview.get("symbol", "")
 
         return info
 
-    async def get_token_holders(self, mint: str, max_holders: int = MAX_HOLDERS_TO_PARSE) -> list[TokenHolder]:
+    async def get_token_holders(self, mint: str, max_holders: int = None) -> list[TokenHolder]:
         """Return top token holders with their wallet addresses."""
+        max_holders = max_holders or settings.MAX_HOLDERS_TO_PARSE
         holders: list[TokenHolder] = []
 
-        if HELIUS_API_KEY:
+        if settings.HELIUS_API_KEY:
             holders = await self._get_holders_helius(mint, max_holders)
         else:
             holders = await self._get_holders_rpc(mint, max_holders)
