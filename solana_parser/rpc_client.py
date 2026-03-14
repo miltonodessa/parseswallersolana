@@ -29,7 +29,7 @@ class SolanaRPCClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _rpc(self, method: str, params: list) -> Any:
+    async def _rpc(self, method: str, params: list, _retries: int = 4) -> Any:
         self._id += 1
         payload = {
             "jsonrpc": "2.0",
@@ -38,16 +38,30 @@ class SolanaRPCClient:
             "params": params,
         }
         session = await self._get_session()
-        try:
-            async with session.post(self.rpc_url, json=payload) as resp:
-                data = await resp.json()
-                if "error" in data:
-                    logger.warning("RPC error for %s: %s", method, data["error"])
-                    return None
-                return data.get("result")
-        except Exception as e:
-            logger.error("RPC request failed (%s): %s", method, e)
-            return None
+        delay = 2.0
+        for attempt in range(_retries + 1):
+            try:
+                async with session.post(self.rpc_url, json=payload) as resp:
+                    data = await resp.json()
+                    if "error" in data:
+                        code = data["error"].get("code") if isinstance(data["error"], dict) else None
+                        if code == -32429:  # rate limited
+                            if attempt < _retries:
+                                logger.debug("Rate limited on %s, retry %d in %.0fs", method, attempt + 1, delay)
+                                await asyncio.sleep(delay)
+                                delay *= 2
+                                continue
+                        logger.warning("RPC error for %s: %s", method, data["error"])
+                        return None
+                    return data.get("result")
+            except Exception as e:
+                if attempt < _retries:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                logger.error("RPC request failed (%s): %s", method, e)
+                return None
+        return None
 
     async def get_token_largest_accounts(self, mint: str) -> list[dict]:
         result = await self._rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])

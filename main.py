@@ -75,7 +75,7 @@ async def run_parse_token(mint: str):
 
         if not filtered:
             print("\n[!] Ни один кошелёк не прошёл фильтры.")
-            print("    Измени настройки в settings.py")
+            _print_filter_diagnostics(all_stats, filters)
             return
 
         _print_table(filtered[:settings.TOP_RESULTS])
@@ -160,6 +160,49 @@ def _progress_bar(done: int, total: int, width: int = 30) -> str:
     pct = done / total if total else 0
     filled = int(pct * width)
     return f"[{'█' * filled}{'░' * (width - filled)}] {pct:5.1%}"
+
+
+def _print_filter_diagnostics(stats_list, filters):
+    """Показать сводку — сколько кошельков провалило каждый фильтр."""
+    if not stats_list:
+        return
+    total = len(stats_list)
+    keys = ["roi", "win_rate", "fast_trades", "smtb", "balance", "tokens_total",
+            "trades_per_week", "total_trades"]
+    labels = {
+        "roi":            f"ROI ≥ {filters.min_roi}%",
+        "win_rate":       f"WinRate ≥ {filters.min_winrate}%",
+        "fast_trades":    f"FastTrades ≤ {filters.max_fast_trades_pct}%",
+        "smtb":           f"SMTB ≤ {filters.max_smtb_pct}%",
+        "balance":        f"Balance ≥ {filters.min_balance_sol} SOL",
+        "tokens_total":   f"Tokens ≥ {filters.min_tokens_total}",
+        "trades_per_week":f"Частота ≥ {filters.min_trades_per_week}/нед",
+        "total_trades":   f"Сделок ≥ {filters.min_total_trades}",
+    }
+    fail_counts = {k: 0 for k in keys}
+    for s in stats_list:
+        report = s.filter_report(filters)
+        for k in keys:
+            if not report[k]:
+                fail_counts[k] += 1
+
+    print("\n  Диагностика фильтров (сколько кошельков не прошли каждый фильтр):\n")
+    for k in keys:
+        fc = fail_counts[k]
+        pct = fc / total * 100
+        bar = "█" * int(pct / 5)
+        print(f"  {labels[k]:<34}  {fc:>5}/{total}  {pct:>5.1f}%  {bar}")
+
+    if fail_counts["roi"] == total and fail_counts["win_rate"] == total and fail_counts["balance"] == total:
+        print("\n  ⚠  ВСЕ кошельки имеют ROI=0 / WinRate=0 / Balance=0.")
+        print("     Это означает, что API ключи не заданы и данные не получены.")
+        if not settings.HELIUS_API_KEY and not settings.BIRDEYE_API_KEY:
+            print("\n  Решение:")
+            print("  1. Зарегистрируйся на https://helius.dev  → бесплатный план")
+            print("  2. Добавь в settings.py:")
+            print('     HELIUS_API_KEY  = "твой_ключ"')
+            print('     SOLANA_RPC_URL  = "https://mainnet.helius-rpc.com/?api-key=твой_ключ"')
+            print("  3. Запусти снова — Helius даст историю свапов для расчёта ROI/WR")
 
 
 def _print_table(stats_list):
