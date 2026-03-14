@@ -1,6 +1,6 @@
 from .rpc_client import SolanaRPCClient
 from .token_parser import TokenParser
-from .wallet_analyzer import WalletAnalyzer, WalletFilters, WalletStats
+from .wallet_analyzer import WalletAnalyzer, WalletFilters, WalletStats, TokenTrade
 from .cross_traders import CrossTraderFinder
 from .exporter import Exporter
 
@@ -10,6 +10,7 @@ __all__ = [
     "WalletAnalyzer",
     "WalletFilters",
     "WalletStats",
+    "TokenTrade",
     "CrossTraderFinder",
     "Exporter",
 ]

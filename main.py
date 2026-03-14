@@ -81,10 +81,12 @@ async def run_parse_token(mint: str):
         _print_table(filtered[:settings.TOP_RESULTS])
 
         prefix = f"token_{mint[:8]}"
-        csv_path = exporter.export_wallets_csv(filtered, f"{prefix}_{len(filtered)}w.csv")
-        txt_path = exporter.export_wallets_txt(filtered, f"{prefix}_{len(filtered)}w.txt")
-        print(f"\n[+] CSV : {csv_path}")
-        print(f"[+] TXT : {txt_path}")
+        csv_path  = exporter.export_wallets_csv(filtered,   f"{prefix}_{len(filtered)}w.csv")
+        txt_path  = exporter.export_wallets_txt(filtered,   f"{prefix}_{len(filtered)}w.txt")
+        xlsx_path = exporter.export_wallets_excel(filtered, f"{prefix}_{len(filtered)}w.xlsx")
+        print(f"\n[+] CSV  : {csv_path}")
+        print(f"[+] TXT  : {txt_path}")
+        print(f"[+] XLSX : {xlsx_path}")
 
     finally:
         await rpc.close()

@@ -29,6 +29,23 @@ FAST_TRADE_THRESHOLD_SEC = 180
 
 
 @dataclass
+class TokenTrade:
+    """Per-token trading result inside a single wallet."""
+    mint: str
+    symbol: str = ""
+    name: str = ""
+    spent_sol: float = 0.0     # total SOL spent buying
+    earned_sol: float = 0.0    # total SOL received from sells
+    pnl_sol: float = 0.0       # earned - spent
+    roi: float = 0.0            # (pnl / spent) * 100
+    buys: int = 0
+    sells: int = 0
+    first_swap_ts: int = 0      # unix timestamp of first buy
+    last_swap_ts: int = 0       # unix timestamp of last sell
+    duration_sec: int = 0       # last_swap - first_swap
+
+
+@dataclass
 class WalletStats:
     wallet: str
 
@@ -50,6 +67,7 @@ class WalletStats:
 
     # Internals
     tokens_traded: list[str] = field(default_factory=list)
+    token_trades: list["TokenTrade"] = field(default_factory=list)
     first_trade_ts: Optional[int] = None   # unix timestamp
     last_trade_ts: Optional[int] = None
 
@@ -271,8 +289,12 @@ class WalletAnalyzer:
         all_mints = set(list(buys.keys()) + list(sells.keys()))
 
         for mint in all_mints:
-            buy_list = sorted(buys.get(mint, []), key=lambda x: x[1])
+            buy_list  = sorted(buys.get(mint, []),  key=lambda x: x[1])
             sell_list = sorted(sells.get(mint, []), key=lambda x: x[1])
+
+            t_spent  = 0.0
+            t_earned = 0.0
+            t_fast   = 0
 
             # SMTB: sells without a matching buy
             if len(sell_list) > len(buy_list):
@@ -283,8 +305,10 @@ class WalletAnalyzer:
                 if i < len(buy_list):
                     buy_sol, buy_ts = buy_list[i]
                     total_bought_sol += buy_sol
+                    t_spent          += buy_sol
+                    t_earned         += sell_sol
                     trade_pnl = sell_sol - buy_sol
-                    pnl_sol += trade_pnl
+                    pnl_sol  += trade_pnl
                     all_trades += 1
 
                     if trade_pnl > 0:
@@ -292,24 +316,47 @@ class WalletAnalyzer:
                     else:
                         stats.losing_trades += 1
 
-                    # Fast trade check
                     duration = abs(sell_ts - buy_ts)
                     if 0 < duration < FAST_TRADE_THRESHOLD_SEC:
                         fast_trade_count += 1
+                        t_fast += 1
+
+            # Build per-token TokenTrade record
+            all_ts = [ts for _, ts in buy_list + sell_list if ts]
+            first_ts = min(all_ts) if all_ts else 0
+            last_ts  = max(all_ts) if all_ts else 0
+            t_pnl = t_earned - t_spent
+            t_roi = (t_pnl / t_spent * 100) if t_spent > 0 else 0.0
+
+            stats.token_trades.append(TokenTrade(
+                mint=mint,
+                spent_sol=t_spent,
+                earned_sol=t_earned,
+                pnl_sol=t_pnl,
+                roi=t_roi,
+                buys=len(buy_list),
+                sells=len(sell_list),
+                first_swap_ts=first_ts,
+                last_swap_ts=last_ts,
+                duration_sec=abs(last_ts - first_ts),
+            ))
+
+        # Sort token trades by absolute PnL descending
+        stats.token_trades.sort(key=lambda t: abs(t.pnl_sol), reverse=True)
 
         stats.total_trades = all_trades + max(0, len(all_mints) - len(sells))
         if stats.total_trades > 0:
-            stats.win_rate = (stats.winning_trades / all_trades * 100) if all_trades else 0
+            stats.win_rate        = (stats.winning_trades / all_trades * 100) if all_trades else 0
             stats.fast_trades_pct = (fast_trade_count / stats.total_trades) * 100
-            stats.smtb_pct = (smtb_count / stats.total_trades) * 100
+            stats.smtb_pct        = (smtb_count / stats.total_trades) * 100
 
         if total_bought_sol > 0:
             stats.roi = (pnl_sol / total_bought_sol) * 100
-        stats.total_pnl_usd = pnl_sol  # in SOL; multiply by price for USD
+        stats.total_pnl_usd = pnl_sol
 
         if timestamps:
             stats.first_trade_ts = min(timestamps)
-            stats.last_trade_ts = max(timestamps)
+            stats.last_trade_ts  = max(timestamps)
             span_weeks = max(
                 (stats.last_trade_ts - stats.first_trade_ts) / (7 * 86400), 1 / 7
             )

@@ -1,72 +1,79 @@
-"""Export parsed results to CSV and text files."""
+"""Export parsed results to CSV, TXT, and Excel files."""
 import csv
 import logging
 import os
 from datetime import datetime
-from typing import Union
 
-from config import RESULTS_DIR
+import settings
 from .wallet_analyzer import WalletStats
 from .cross_traders import CrossTrader
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_dir(path: str):
-    os.makedirs(path, exist_ok=True)
-
-
 class Exporter:
-    def __init__(self, results_dir: str = RESULTS_DIR):
-        self.results_dir = results_dir
-        _ensure_dir(results_dir)
+    def __init__(self, results_dir: str = None):
+        self.results_dir = results_dir or settings.RESULTS_DIR
+        os.makedirs(self.results_dir, exist_ok=True)
 
     def _timestamp(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    def export_wallets_csv(
-        self, stats_list: list[WalletStats], filename: str = ""
-    ) -> str:
+    def _path(self, filename: str) -> str:
+        return os.path.join(self.results_dir, filename)
+
+    # ------------------------------------------------------------------
+    # CSV / TXT
+    # ------------------------------------------------------------------
+
+    def export_wallets_csv(self, stats_list: list[WalletStats], filename: str = "") -> str:
         if not filename:
             filename = f"wallets_{self._timestamp()}.csv"
-        path = os.path.join(self.results_dir, filename)
+        path = self._path(filename)
 
         fieldnames = [
             "wallet", "total_trades", "winning_trades", "losing_trades",
-            "win_rate", "total_pnl_usd", "roi", "avg_trade_size_usd",
-            "tokens_traded", "sol_balance", "is_bot", "score",
+            "win_rate_%", "roi_%", "total_pnl_usd", "avg_trade_size_sol",
+            "fast_trades_%", "smtb_%", "sol_balance", "tokens_total",
+            "trades_per_week", "score",
         ]
-
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for s in stats_list:
                 writer.writerow(s.to_dict())
 
-        logger.info("Exported %d wallets to %s", len(stats_list), path)
+        logger.info("Exported %d wallets (CSV) → %s", len(stats_list), path)
         return path
 
-    def export_wallets_txt(
-        self, stats_list: list[WalletStats], filename: str = ""
-    ) -> str:
-        """Plain list of wallet addresses (one per line)."""
+    def export_wallets_txt(self, stats_list: list[WalletStats], filename: str = "") -> str:
+        """Plain list of wallet addresses, one per line."""
         if not filename:
             filename = f"wallets_{self._timestamp()}.txt"
-        path = os.path.join(self.results_dir, filename)
+        path = self._path(filename)
 
         with open(path, "w", encoding="utf-8") as f:
             for s in stats_list:
                 f.write(s.wallet + "\n")
 
-        logger.info("Exported %d wallet addresses to %s", len(stats_list), path)
+        logger.info("Exported %d wallet addresses (TXT) → %s", len(stats_list), path)
         return path
 
-    def export_cross_traders_csv(
-        self, traders: list[CrossTrader], filename: str = ""
-    ) -> str:
+    def export_wallets_excel(self, stats_list: list[WalletStats], filename: str = "") -> str:
+        """Export to .xlsx with Summary sheet + per-wallet sheets."""
+        from .excel_exporter import export_wallets_excel as _do_export
+        if not filename:
+            filename = f"wallets_{self._timestamp()}.xlsx"
+        return _do_export(stats_list, results_dir=self.results_dir, filename=filename)
+
+    # ------------------------------------------------------------------
+    # Cross-traders
+    # ------------------------------------------------------------------
+
+    def export_cross_traders_csv(self, traders: list[CrossTrader], filename: str = "") -> str:
         if not filename:
             filename = f"cross_traders_{self._timestamp()}.csv"
-        path = os.path.join(self.results_dir, filename)
+        path = self._path(filename)
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["wallet", "token_count", "tokens"])
@@ -78,22 +85,25 @@ class Exporter:
                     "tokens": ",".join(t.tokens),
                 })
 
-        logger.info("Exported %d cross-traders to %s", len(traders), path)
+        logger.info("Exported %d cross-traders (CSV) → %s", len(traders), path)
         return path
 
-    def export_dev_wallets_csv(
-        self, dev_data: list[dict], filename: str = ""
-    ) -> str:
-        """Export dev wallets: [{mint, dev_wallet, name, symbol}]."""
+    # ------------------------------------------------------------------
+    # Dev wallets
+    # ------------------------------------------------------------------
+
+    def export_dev_wallets_csv(self, dev_data: list[dict], filename: str = "") -> str:
         if not filename:
             filename = f"dev_wallets_{self._timestamp()}.csv"
-        path = os.path.join(self.results_dir, filename)
+        path = self._path(filename)
 
-        fieldnames = ["mint", "dev_wallet", "name", "symbol"]
         with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer = csv.DictWriter(
+                f, fieldnames=["mint", "dev_wallet", "name", "symbol"],
+                extrasaction="ignore",
+            )
             writer.writeheader()
             writer.writerows(dev_data)
 
-        logger.info("Exported %d dev wallets to %s", len(dev_data), path)
+        logger.info("Exported %d dev wallets (CSV) → %s", len(dev_data), path)
         return path
