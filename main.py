@@ -158,23 +158,22 @@ async def run_parse_tokens(mints: list[str]):
 async def run_pump_today(
     analyze: bool = False,
     min_usd_mc: float = 0.0,
-    only_graduated: bool = False,
+    only_migrated: bool = True,
     max_tokens: int = None,
 ):
     max_tokens = max_tokens or settings.PUMP_MAX_TOKENS_TODAY
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     print(f"\n[*] Загружаю токены pump.fun созданные сегодня ({today_str} UTC)...")
+    print(f"[*] Режим: {'только мигрированные (bonding curve complete)' if only_migrated else 'все токены'}")
     if min_usd_mc > 0:
         print(f"[*] Фильтр: min USD Market Cap = ${min_usd_mc:,.0f}")
-    if only_graduated:
-        print("[*] Фильтр: только graduated (bonding curve complete)")
     print(f"[*] Макс. токенов: {max_tokens}\n")
 
     tokens = await fetch_today_tokens(
         max_tokens=max_tokens,
         min_usd_market_cap=min_usd_mc,
-        only_graduated=only_graduated,
+        only_graduated=only_migrated,
     )
 
     if not tokens:
@@ -417,14 +416,15 @@ def build_parser() -> argparse.ArgumentParser:
     pts_src.add_argument("--file", metavar="PATH",
                          help="Файл со списком mint-адресов (по одному на строку)")
 
-    # pump_today — токены pump.fun сегодня
-    pump = sub.add_parser("pump_today", help="Токены pump.fun созданные сегодня")
+    # pump_today — токены pump.fun сегодня (по умолчанию — только мигрированные)
+    pump = sub.add_parser("pump_today",
+                          help="Мигрированные токены pump.fun созданные сегодня")
     pump.add_argument("--analyze", action="store_true",
                       help="Анализировать кошельки всех найденных токенов")
+    pump.add_argument("--all", action="store_true", dest="all_tokens",
+                      help="Включить НЕ мигрированные токены (по умолчанию только migrated)")
     pump.add_argument("--min-mc", type=float, default=0.0, metavar="USD",
                       help="Минимальный USD Market Cap (default: 0 = все)")
-    pump.add_argument("--graduated", action="store_true",
-                      help="Только graduated токены (bonding curve complete)")
     pump.add_argument("--max", type=int, default=None, metavar="N",
                       help=f"Макс. кол-во токенов (default: {settings.PUMP_MAX_TOKENS_TODAY})")
 
@@ -473,7 +473,7 @@ def main():
         asyncio.run(run_pump_today(
             analyze=args.analyze,
             min_usd_mc=args.min_mc,
-            only_graduated=args.graduated,
+            only_migrated=not args.all_tokens,
             max_tokens=args.max,
         ))
 
