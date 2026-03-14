@@ -226,7 +226,11 @@ class WalletAnalyzer:
     # ------------------------------------------------------------------
 
     async def _fill_from_helius(self, wallet: str, stats: WalletStats) -> WalletStats:
-        txs = await self.rpc.helius_get_parsed_transactions([wallet], tx_type="SWAP")
+        import time as _time
+        since_ts = int(_time.time()) - settings.WALLET_ANALYSIS_DAYS * 86400
+        txs = await self.rpc.helius_get_parsed_transactions(
+            [wallet], tx_type="SWAP", since_ts=since_ts
+        )
         if not txs:
             return stats
 
@@ -282,9 +286,12 @@ class WalletAnalyzer:
     ) -> WalletStats:
         fast_trade_count = 0
         smtb_count = 0
-        all_trades = 0
-        total_bought_sol = 0.0
-        pnl_sol = 0.0
+        closed_positions = 0   # tokens that have at least one sell
+        total_positions = 0    # tokens that have at least one buy
+
+        # Realized PnL: only for positions that have both buys and sells
+        closed_buy_sol  = 0.0
+        closed_sell_sol = 0.0
 
         all_mints = set(list(buys.keys()) + list(sells.keys()))
 
@@ -292,41 +299,40 @@ class WalletAnalyzer:
             buy_list  = sorted(buys.get(mint, []),  key=lambda x: x[1])
             sell_list = sorted(sells.get(mint, []), key=lambda x: x[1])
 
-            t_spent  = 0.0
-            t_earned = 0.0
-            t_fast   = 0
+            t_spent  = sum(b[0] for b in buy_list)
+            t_earned = sum(s[0] for s in sell_list)
 
-            # SMTB: sells without a matching buy
+            # SMTB: sells with no matching buy (received via airdrop/transfer)
             if len(sell_list) > len(buy_list):
                 smtb_count += len(sell_list) - len(buy_list)
 
-            # Match buys to sells for PnL + fast trades
-            for i, (sell_sol, sell_ts) in enumerate(sell_list):
-                if i < len(buy_list):
-                    buy_sol, buy_ts = buy_list[i]
-                    total_bought_sol += buy_sol
-                    t_spent          += buy_sol
-                    t_earned         += sell_sol
-                    trade_pnl = sell_sol - buy_sol
-                    pnl_sol  += trade_pnl
-                    all_trades += 1
-
-                    if trade_pnl > 0:
-                        stats.winning_trades += 1
-                    else:
-                        stats.losing_trades += 1
-
-                    duration = abs(sell_ts - buy_ts)
-                    if 0 < duration < FAST_TRADE_THRESHOLD_SEC:
-                        fast_trade_count += 1
-                        t_fast += 1
-
-            # Build per-token TokenTrade record
             all_ts = [ts for _, ts in buy_list + sell_list if ts]
             first_ts = min(all_ts) if all_ts else 0
             last_ts  = max(all_ts) if all_ts else 0
             t_pnl = t_earned - t_spent
             t_roi = (t_pnl / t_spent * 100) if t_spent > 0 else 0.0
+
+            if buy_list:
+                total_positions += 1
+
+                if sell_list:
+                    # ── Closed position: has both buy and sell ──────────────────
+                    closed_positions += 1
+                    closed_buy_sol  += t_spent
+                    closed_sell_sol += t_earned
+
+                    if t_pnl > 0:
+                        stats.winning_trades += 1
+                    else:
+                        stats.losing_trades += 1
+
+                    # Fast trade: time from first buy to first sell
+                    first_buy_ts  = buy_list[0][1]
+                    first_sell_ts = sell_list[0][1]
+                    duration = abs(first_sell_ts - first_buy_ts)
+                    if 0 < duration < FAST_TRADE_THRESHOLD_SEC:
+                        fast_trade_count += 1
+                # else: open position (still held) — not counted in WR/fast
 
             stats.token_trades.append(TokenTrade(
                 mint=mint,
@@ -341,18 +347,25 @@ class WalletAnalyzer:
                 duration_sec=abs(last_ts - first_ts),
             ))
 
-        # Sort token trades by absolute PnL descending
         stats.token_trades.sort(key=lambda t: abs(t.pnl_sol), reverse=True)
 
-        stats.total_trades = all_trades + max(0, len(all_mints) - len(sells))
-        if stats.total_trades > 0:
-            stats.win_rate        = (stats.winning_trades / all_trades * 100) if all_trades else 0
-            stats.fast_trades_pct = (fast_trade_count / stats.total_trades) * 100
-            stats.smtb_pct        = (smtb_count / stats.total_trades) * 100
+        # total_trades = all unique token positions (bought or sold)
+        stats.total_trades = total_positions
 
-        if total_bought_sol > 0:
-            stats.roi = (pnl_sol / total_bought_sol) * 100
-        stats.total_pnl_usd = pnl_sol
+        # WR and fast-trade % over CLOSED positions only
+        if closed_positions > 0:
+            stats.win_rate        = (stats.winning_trades / closed_positions) * 100
+            stats.fast_trades_pct = (fast_trade_count / closed_positions) * 100
+
+        # SMTB % over total positions
+        if total_positions > 0:
+            stats.smtb_pct = (smtb_count / total_positions) * 100
+
+        # ROI = realized PnL on closed positions / capital deployed in closed positions
+        realized_pnl = closed_sell_sol - closed_buy_sol
+        if closed_buy_sol > 0:
+            stats.roi = (realized_pnl / closed_buy_sol) * 100
+        stats.total_pnl_usd = realized_pnl  # in SOL units (no USD conversion without price)
 
         if timestamps:
             stats.first_trade_ts = min(timestamps)
@@ -360,7 +373,7 @@ class WalletAnalyzer:
             span_weeks = max(
                 (stats.last_trade_ts - stats.first_trade_ts) / (7 * 86400), 1 / 7
             )
-            stats.trades_per_week = stats.total_trades / span_weeks
+            stats.trades_per_week = total_positions / span_weeks
 
         return stats
 

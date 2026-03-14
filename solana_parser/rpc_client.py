@@ -141,21 +141,60 @@ class SolanaRPCClient:
             return {}
 
     async def helius_get_parsed_transactions(
-        self, addresses: list[str], tx_type: str = "SWAP"
+        self,
+        addresses: list[str],
+        tx_type: str = "SWAP",
+        since_ts: int = 0,
+        max_pages: int = 5,
     ) -> list[dict]:
-        """Fetch enriched transaction history via Helius."""
+        """
+        Fetch enriched transaction history via Helius.
+
+        Paginates until `since_ts` is reached or `max_pages` exhausted.
+        `since_ts` is a unix timestamp — transactions older than this are dropped.
+        """
         if not settings.HELIUS_API_KEY:
             return []
         session = await self._get_session()
-        url = f"{HELIUS_BASE_URL}/addresses/{','.join(addresses)}/transactions?api-key={settings.HELIUS_API_KEY}&type={tx_type}&limit=100"
-        try:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                return []
-        except Exception as e:
-            logger.error("Helius transactions error: %s", e)
-            return []
+        base = (
+            f"{HELIUS_BASE_URL}/addresses/{','.join(addresses)}/transactions"
+            f"?api-key={settings.HELIUS_API_KEY}&type={tx_type}&limit=100"
+        )
+        all_txs: list[dict] = []
+        before_sig: str = ""
+
+        for _ in range(max_pages):
+            url = base + (f"&before={before_sig}" if before_sig else "")
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        break
+                    page: list[dict] = await resp.json()
+            except Exception as e:
+                logger.error("Helius transactions error: %s", e)
+                break
+
+            if not page:
+                break
+
+            # Filter by time window and collect
+            stop = False
+            for tx in page:
+                ts = tx.get("timestamp", 0) or 0
+                if since_ts and ts < since_ts:
+                    stop = True
+                    break
+                all_txs.append(tx)
+
+            if stop or len(page) < 100:
+                break
+
+            # Cursor for next page = signature of last tx in this page
+            before_sig = page[-1].get("signature", "")
+            if not before_sig:
+                break
+
+        return all_txs
 
     # ------------------------------------------------------------------
     # Birdeye wallet analytics
