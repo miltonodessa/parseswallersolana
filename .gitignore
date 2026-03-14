@@ -1,0 +1,18 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+results/
+*.csv
+# Exclude generated txt exports but keep requirements
+results/*.txt
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
