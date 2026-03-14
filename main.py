@@ -28,7 +28,7 @@ from solana_parser import (
     SolanaRPCClient, TokenParser, WalletAnalyzer, WalletFilters,
     CrossTraderFinder, Exporter,
 )
-from solana_parser.pump_fetcher import fetch_today_tokens, PumpToken
+from solana_parser.pump_fetcher import fetch_today_tokens, PumpToken, fetch_sol_price, migration_threshold_usd
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +164,15 @@ async def run_pump_today(
     max_tokens = max_tokens or settings.PUMP_MAX_TOKENS_TODAY
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Fetch SOL price and show migration threshold
+    sol_price = await fetch_sol_price()
+    migration_usd = migration_threshold_usd(sol_price) if sol_price else 0.0
+
     print(f"\n[*] Загружаю токены pump.fun созданные сегодня ({today_str} UTC)...")
     print(f"[*] Режим: {'только мигрированные (bonding curve complete)' if only_migrated else 'все токены'}")
+    if sol_price:
+        print(f"[*] SOL цена   : ${sol_price:,.2f}")
+        print(f"[*] Порог миграции: ~${migration_usd:,.0f} USD  (85 SOL × ${sol_price:.2f} × 4.8)")
     if min_usd_mc > 0:
         print(f"[*] Фильтр: min USD Market Cap = ${min_usd_mc:,.0f}")
     print(f"[*] Макс. токенов: {max_tokens}\n")

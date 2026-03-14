@@ -31,6 +31,57 @@ _PUMP_API_URL  = "https://frontend-api.pump.fun/coins"
 _PUMP_API_V2   = "https://frontend-api-v3.pump.fun/coins"
 _PAGE_SIZE     = 50
 
+# pump.fun bonding curve: graduates when 85 SOL are raised.
+# Market cap at graduation ≈ 85 SOL × SOL_price × ~4.8 (fully-diluted factor).
+# At SOL=$86 → migration MC ≈ $35 000 USD.
+PUMP_GRADUATION_SOL = 85          # fixed on-chain threshold
+PUMP_MC_MULTIPLIER  = 4.8         # empirical FDV/raised ratio at graduation
+
+_COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+
+
+async def fetch_sol_price() -> float:
+    """
+    Fetch current SOL/USD price from CoinGecko (free, no API key).
+    Uses urllib in a thread so it works even when aiohttp DNS is restricted.
+    """
+    import asyncio, urllib.request, json as _json
+
+    def _get_price() -> float:
+        try:
+            with urllib.request.urlopen(_COINGECKO_URL, timeout=10) as r:
+                data = _json.load(r)
+                return float(data["solana"]["usd"])
+        except Exception:
+            pass
+        # aiohttp fallback
+        return 0.0
+
+    try:
+        loop = asyncio.get_event_loop()
+        price = await loop.run_in_executor(None, _get_price)
+        if price:
+            return price
+    except Exception as e:
+        logger.warning("Could not fetch SOL price: %s", e)
+
+    # aiohttp fallback
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(_COINGECKO_URL) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return float(data["solana"]["usd"])
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def migration_threshold_usd(sol_price: float) -> float:
+    """Calculate approximate USD market cap at pump.fun migration."""
+    return PUMP_GRADUATION_SOL * sol_price * PUMP_MC_MULTIPLIER
+
 # Max transactions to scan via RPC when the API is unavailable
 PUMP_RPC_SCAN_LIMIT = 2000
 
