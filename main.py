@@ -49,8 +49,44 @@ async def _analyze_and_export(
     if label:
         print(f"[*] Фильтры: {filters.describe()}\n")
 
+    # ── Шаг 1.5: пре-фильтрация по SOL-балансу ──────────────────────────
+    total_before = len(wallets)
+    if not settings.SKIP_BALANCE_PREFILTER and settings.MIN_BALANCE_SOL > 0:
+        print(f"\n[1.5/3] Пре-фильтр: SOL-баланс ≥ {settings.MIN_BALANCE_SOL} SOL "
+              f"({total_before:,} кошельков → батчи по 100)...")
+
+        pf_done = [0]
+
+        async def pf_progress(done_batches, total_batches, passing_count):
+            pf_done[0] = done_batches
+            bar = _progress_bar(done_batches, total_batches)
+            checked = min(done_batches * 100, total_before)
+            print(
+                f"\r      {bar}  {checked:,}/{total_before:,}  "
+                f"прошли: {passing_count:,}",
+                end="", flush=True,
+            )
+
+        wallets = await analyzer.prefilter_by_balance(
+            wallets,
+            min_sol=settings.MIN_BALANCE_SOL,
+            concurrency=settings.BALANCE_CHECK_CONCURRENCY,
+            progress_callback=pf_progress,
+        )
+        print()
+        dropped = total_before - len(wallets)
+        pct = dropped / total_before * 100 if total_before else 0
+        print(f"      Осталось: {len(wallets):,} кошельков  "
+              f"(убрано {dropped:,} = {pct:.1f}% без достаточного баланса)\n")
+
+        if not wallets:
+            print("[!] После пре-фильтра кошельков не осталось. "
+                  "Уменьши MIN_BALANCE_SOL в settings.py или установи "
+                  "SKIP_BALANCE_PREFILTER = True")
+            return
+
     total = len(wallets)
-    print(f"\n[2/3] Анализирую {total} уникальных кошельков...")
+    print(f"\n[2/3] Анализирую {total:,} уникальных кошельков...")
 
     async def progress(done, total_):
         bar = _progress_bar(done, total_)
@@ -134,12 +170,14 @@ async def run_parse_tokens(mints: list[str]):
             bar = _progress_bar(done, total)
             print(f"\r      {bar}  {done}/{total}  [{mint[:8]}...]", end="", flush=True)
 
-        wallets = await parser.collect_unique_wallets(
+        wallets, appearances = await parser.collect_unique_wallets(
             mints,
             token_concurrency=settings.TOKEN_CONCURRENCY,
             progress_callback=token_progress,
+            min_appearances=settings.MIN_WALLET_APPEARANCES,
         )
-        print(f"\n      Уникальных кошельков: {len(wallets)}")
+        print(f"\n      Уникальных кошельков: {len(wallets):,}"
+              + (f"  (фильтр ≥{settings.MIN_WALLET_APPEARANCES} токена)" if settings.MIN_WALLET_APPEARANCES > 1 else ""))
 
         if not wallets:
             print("[-] Нет кошельков для анализа.")
@@ -221,12 +259,14 @@ async def run_pump_today(
             bar = _progress_bar(done, total)
             print(f"\r      {bar}  {done}/{total}  [{mint[:8]}...]", end="", flush=True)
 
-        wallets = await parser.collect_unique_wallets(
+        wallets, appearances = await parser.collect_unique_wallets(
             mints,
             token_concurrency=settings.TOKEN_CONCURRENCY,
             progress_callback=token_progress,
+            min_appearances=settings.MIN_WALLET_APPEARANCES,
         )
-        print(f"\n      Уникальных кошельков: {len(wallets)}")
+        print(f"\n      Уникальных кошельков: {len(wallets):,}"
+              + (f"  (фильтр ≥{settings.MIN_WALLET_APPEARANCES} токена)" if settings.MIN_WALLET_APPEARANCES > 1 else ""))
 
         if not wallets:
             print("[-] Нет кошельков для анализа.")

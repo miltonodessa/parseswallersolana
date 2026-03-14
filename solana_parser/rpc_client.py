@@ -109,7 +109,36 @@ class SolanaRPCClient:
             [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
         )
 
-    async def get_program_accounts(self, program: str, filters: list) -> list[dict]:
+    async def get_multiple_accounts(self, pubkeys: list[str]) -> list[Optional[dict]]:
+        """
+        Fetch up to 100 accounts in one RPC call (getMultipleAccounts).
+        Returns a list aligned with pubkeys — None for missing/empty accounts.
+        """
+        if not pubkeys:
+            return []
+        result = await self._rpc(
+            "getMultipleAccounts",
+            [pubkeys[:100], {"commitment": "confirmed"}],
+        )
+        if result:
+            return result.get("value") or [None] * len(pubkeys)
+        return [None] * len(pubkeys)
+
+    async def get_sol_balances_batch(
+        self, wallets: list[str], batch_size: int = 100
+    ) -> dict[str, float]:
+        """
+        Return {wallet: sol_balance} for all wallets using batched getMultipleAccounts.
+        Much faster than individual getBalance calls: 100 wallets per RPC call.
+        """
+        result: dict[str, float] = {}
+        for i in range(0, len(wallets), batch_size):
+            batch = wallets[i : i + batch_size]
+            accounts = await self.get_multiple_accounts(batch)
+            for wallet, account in zip(batch, accounts):
+                lamports = (account or {}).get("lamports", 0) or 0
+                result[wallet] = lamports / 1e9
+        return result
         result = await self._rpc(
             "getProgramAccounts",
             [program, {"encoding": "jsonParsed", "filters": filters}],

@@ -167,6 +167,50 @@ class WalletAnalyzer:
     def passes_filter(self, stats: WalletStats, filters: WalletFilters) -> bool:
         return all(stats.filter_report(filters).values())
 
+    async def prefilter_by_balance(
+        self,
+        wallets: list[str],
+        min_sol: float,
+        concurrency: int = 20,
+        progress_callback=None,
+    ) -> list[str]:
+        """
+        Fast pre-filter: drop wallets whose SOL balance < min_sol.
+
+        Uses batched getMultipleAccounts (100 wallets per RPC call) so the
+        cost is ~len(wallets)/100 RPC calls instead of len(wallets) calls.
+        At public RPC limits this takes ~2-5 minutes for 273k wallets.
+
+        Returns the subset of wallets that pass the balance check.
+        """
+        if min_sol <= 0:
+            return wallets
+
+        passing: list[str] = []
+        batch_size = 100
+        total_batches = (len(wallets) + batch_size - 1) // batch_size
+        done = 0
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _check_batch(batch: list[str]):
+            nonlocal done
+            async with sem:
+                balances = await self.rpc.get_sol_balances_batch(batch, batch_size=len(batch))
+                ok = [w for w in batch if balances.get(w, 0) >= min_sol]
+                return ok
+
+        batches = [wallets[i : i + batch_size] for i in range(0, len(wallets), batch_size)]
+        tasks = [_check_batch(b) for b in batches]
+
+        for coro in asyncio.as_completed(tasks):
+            ok = await coro
+            passing.extend(ok)
+            done += 1
+            if progress_callback:
+                await progress_callback(done, total_batches, len(passing))
+
+        return passing
+
     async def analyze_wallets_batch(
         self,
         wallets: list[str],

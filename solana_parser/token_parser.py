@@ -180,7 +180,8 @@ class TokenParser:
         mints: list[str],
         token_concurrency: int = 5,
         progress_callback=None,
-    ) -> list[str]:
+        min_appearances: int = 1,
+    ) -> tuple[list[str], dict[str, int]]:
         """
         Parse holders of many tokens in parallel, return deduplicated wallet list.
 
@@ -188,12 +189,16 @@ class TokenParser:
             mints:              list of token mint addresses
             token_concurrency:  how many tokens to parse at the same time
             progress_callback:  async fn(done, total, mint) called after each token
+            min_appearances:    only return wallets seen in >= N distinct tokens
+                                (e.g. 2 = wallet must hold tokens from 2+ mints)
 
         Returns:
-            Deduplicated list of wallet addresses sorted by first-seen order.
+            (wallets, appearances) where:
+              wallets     — deduplicated list passing the min_appearances filter
+              appearances — {wallet: count_of_tokens} for all wallets found
         """
         semaphore = asyncio.Semaphore(token_concurrency)
-        seen: dict[str, None] = {}   # ordered-set via insertion-order dict
+        appearances: dict[str, int] = {}   # wallet → number of tokens it appeared in
         done_count = 0
         lock = asyncio.Lock()
 
@@ -205,7 +210,7 @@ class TokenParser:
                     async with lock:
                         for h in holders:
                             if h.wallet:
-                                seen[h.wallet] = None
+                                appearances[h.wallet] = appearances.get(h.wallet, 0) + 1
                 except Exception as e:
                     logger.error("collect_unique_wallets token %s: %s", mint, e)
                 finally:
@@ -216,4 +221,6 @@ class TokenParser:
                         await progress_callback(d, len(mints), mint)
 
         await asyncio.gather(*[_parse_one(m) for m in mints])
-        return list(seen.keys())
+
+        wallets = [w for w, cnt in appearances.items() if cnt >= min_appearances]
+        return wallets, appearances
