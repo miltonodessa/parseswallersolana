@@ -24,8 +24,88 @@ from .rpc_client import SolanaRPCClient
 
 logger = logging.getLogger(__name__)
 
-# Trades shorter than this (seconds) are counted as "fast trades"
-FAST_TRADE_THRESHOLD_SEC = 180
+# Wrapped SOL mint — Jupiter often routes through wSOL instead of native SOL.
+# Transactions using wSOL appear as tokenInputs/tokenOutputs, NOT nativeInput/nativeOutput.
+_WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+
+def _sol_from_swap_side(native: dict, tokens: list) -> float:
+    """
+    Extract total SOL lamports from one side of a Helius swap event.
+    Sums native SOL + any wSOL tokens (both denominated in lamports / raw units).
+    Returns SOL as a float (already converted from lamports).
+    """
+    lamports = float((native or {}).get("amount", 0) or 0)
+    for tok in tokens:
+        if tok.get("mint") == _WSOL_MINT:
+            raw = tok.get("rawTokenAmount") or {}
+            # wSOL has 9 decimals, same as native SOL
+            lamports += float(raw.get("tokenAmount", 0) or 0)
+    return lamports / 1e9
+
+
+def _real_tokens(token_list: list) -> list:
+    """Filter wSOL out of a token list — we want actual SPL tokens only."""
+    return [t for t in token_list if t.get("mint") != _WSOL_MINT]
+
+
+def _record_swap(swap: dict, ts: int,
+                 buys: dict, sells: dict, tokens_traded: list) -> bool:
+    """
+    Parse one Helius swap object and update buys/sells dicts.
+
+    Returns True if at least one buy or sell was recorded.
+
+    Handles:
+      - native SOL ↔ token  (standard pump.fun / Raydium swap)
+      - wSOL ↔ token        (Jupiter routes via wrapped SOL)
+    Token ↔ Token swaps (no SOL side) are ignored — can't compute SOL-PnL.
+    """
+    if not swap:
+        return False
+
+    native_in  = swap.get("nativeInput")  or {}
+    native_out = swap.get("nativeOutput") or {}
+    token_in   = swap.get("tokenInputs")  or []
+    token_out  = swap.get("tokenOutputs") or []
+
+    sol_in  = _sol_from_swap_side(native_in,  token_in)
+    sol_out = _sol_from_swap_side(native_out, token_out)
+
+    real_in  = _real_tokens(token_in)
+    real_out = _real_tokens(token_out)
+
+    recorded = False
+
+    # ── Buy: spent SOL, received token(s) ─────────────────────────────
+    if sol_in > 0 and real_out:
+        # Attribute full SOL spent to each output token.
+        # For single-token swaps (the common case) this is exact.
+        # For rare multi-token output routes the cost is shared equally.
+        per_token_sol = sol_in / len(real_out)
+        for tok in real_out:
+            mint = tok.get("mint", "")
+            if mint:
+                buys.setdefault(mint, []).append((per_token_sol, ts))
+                if mint not in tokens_traded:
+                    tokens_traded.append(mint)
+                recorded = True
+
+    # ── Sell: received SOL, sent token(s) ─────────────────────────────
+    # Use `if` not `elif` — a transaction can legitimately have both
+    # (e.g. a swap where SOL enters and different token exits, AND the
+    # router also receives SOL on the output side from another leg).
+    if sol_out > 0 and real_in:
+        per_token_sol = sol_out / len(real_in)
+        for tok in real_in:
+            mint = tok.get("mint", "")
+            if mint:
+                sells.setdefault(mint, []).append((per_token_sol, ts))
+                if mint not in tokens_traded:
+                    tokens_traded.append(mint)
+                recorded = True
+
+    return recorded
 
 
 @dataclass
@@ -291,34 +371,18 @@ class WalletAnalyzer:
             ts = tx.get("timestamp", 0) or 0
             timestamps.append(ts)
             events = tx.get("events", {})
-            swap = events.get("swap", {})
+            swap = events.get("swap") or {}
             if not swap:
                 continue
 
-            native_in = swap.get("nativeInput") or {}
-            native_out = swap.get("nativeOutput") or {}
-            token_in = swap.get("tokenInputs") or []
-            token_out = swap.get("tokenOutputs") or []
-
-            # Buy: SOL → token
-            if native_in and token_out:
-                sol_spent = float(native_in.get("amount", 0)) / 1e9
-                for tok in token_out:
-                    mint = tok.get("mint", "")
-                    if mint:
-                        buys.setdefault(mint, []).append((sol_spent, ts))
-                        if mint not in stats.tokens_traded:
-                            stats.tokens_traded.append(mint)
-
-            # Sell: token → SOL
-            elif token_in and native_out:
-                sol_received = float(native_out.get("amount", 0)) / 1e9
-                for tok in token_in:
-                    mint = tok.get("mint", "")
-                    if mint:
-                        sells.setdefault(mint, []).append((sol_received, ts))
-                        if mint not in stats.tokens_traded:
-                            stats.tokens_traded.append(mint)
+            # Try to record from the top-level swap event first.
+            # If it yields nothing (e.g. complex Jupiter multi-hop where
+            # the outer wrapper has no direct SOL flow), fall back to
+            # innerSwaps which describe each individual leg of the route.
+            recorded = _record_swap(swap, ts, buys, sells, stats.tokens_traded)
+            if not recorded:
+                for inner in swap.get("innerSwaps") or []:
+                    _record_swap(inner, ts, buys, sells, stats.tokens_traded)
 
         # Compute PnL, WinRate, FastTrades, SMTB
         stats = self._compute_helius_metrics(stats, buys, sells, timestamps)
