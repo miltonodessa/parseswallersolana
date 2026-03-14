@@ -1,16 +1,19 @@
 """
-Fetch tokens created today on pump.fun.
+Fetch tokens that MIGRATED today on pump.fun.
 
 Strategy (tried in order):
   1. pump.fun REST API  (frontend-api.pump.fun)
+     — sorted by last_trade_timestamp DESC (≈ migration time for graduated tokens)
      — blocked by Cloudflare from datacenter IPs; works from a home machine.
   2. On-chain RPC scan  (Solana getSignaturesForAddress + getTransaction)
-     — works everywhere, but limited to the most recent N signatures.
-     — identifies "create" txs via log message "Instruction: Create",
-       extracts mint from postTokenBalances.
+     — scans pump.fun bonding curve program for "SetComplete" / migration txs.
+     — works everywhere, but limited to PUMP_RPC_SCAN_LIMIT transactions.
 
-If the API is blocked, the RPC fallback returns the most recent tokens
-created today (up to PUMP_RPC_SCAN_LIMIT transactions scanned).
+Why last_trade_timestamp ≈ migration time:
+  After a token graduates, pump.fun stops updating last_trade_timestamp
+  (all further trading happens on Raydium, not the bonding curve).
+  So for complete=True tokens, last_trade_timestamp is effectively frozen
+  at the moment the bonding curve was filled — i.e. the migration time.
 """
 
 from __future__ import annotations
@@ -123,15 +126,18 @@ class PumpToken:
 async def fetch_today_tokens(
     max_tokens: int = 1000,
     min_usd_market_cap: float = 0.0,
-    only_graduated: bool = False,
+    only_graduated: bool = True,
     rpc_url: str = None,
 ) -> list[PumpToken]:
     """
-    Fetch all pump.fun tokens created today (UTC midnight → now).
+    Fetch pump.fun tokens that MIGRATED today (UTC midnight → now).
 
-    Tries the pump.fun REST API first; falls back to on-chain RPC scan
-    if the API is unreachable (e.g. blocked by Cloudflare on server IPs).
+    When only_graduated=True (default): filters by last_trade_timestamp,
+    which ≈ migration time for completed bonding curves.
 
+    When only_graduated=False: filters by created_timestamp (all new tokens).
+
+    Tries the pump.fun REST API first; falls back to on-chain RPC scan.
     Returns a list of PumpToken sorted newest-first.
     """
     today_start = _today_start_ts()
@@ -149,9 +155,7 @@ async def fetch_today_tokens(
     # ── Attempt 2: on-chain RPC scan ────────────────────────────────────
     logger.warning(
         "pump.fun API blocked (likely Cloudflare protecting server IPs). "
-        "Falling back to on-chain Solana RPC scan. "
-        "Note: this only returns the most recent tokens, not the full day. "
-        "To get all today's tokens, run the parser from a home machine."
+        "Falling back to on-chain Solana RPC scan."
     )
     tokens = await _fetch_via_rpc(
         rpc_url=rpc_url,
@@ -177,10 +181,22 @@ async def _fetch_via_api(
 ) -> Optional[list[PumpToken]]:
     """
     Returns list on success (possibly empty), None on connection/auth failure.
+
+    When only_graduated=True:
+      Sorts by last_trade_timestamp DESC — for completed bonding curves this
+      timestamp is frozen at migration moment (pump.fun stops updating it once
+      the token moves to Raydium). We stop when last_trade_timestamp < today.
+
+    When only_graduated=False:
+      Sorts by created_timestamp DESC — shows all new tokens created today.
     """
     today_start_ms = today_start_ts * 1000  # pump.fun uses ms timestamps
     tokens: list[PumpToken] = []
     offset = 0
+
+    # For migrated tokens use last_trade_timestamp (≈ migration time).
+    # For all tokens use created_timestamp.
+    sort_field = "last_trade_timestamp" if only_graduated else "created_timestamp"
 
     try:
         async with aiohttp.ClientSession(
@@ -191,7 +207,7 @@ async def _fetch_via_api(
                 params = {
                     "offset":       offset,
                     "limit":        _PAGE_SIZE,
-                    "sort":         "created_timestamp",
+                    "sort":         sort_field,
                     "order":        "DESC",
                     "includeNsfw":  "true",
                 }
@@ -211,12 +227,22 @@ async def _fetch_via_api(
                 if not data or not isinstance(data, list):
                     break
 
-                reached_yesterday = False
+                reached_cutoff = False
                 for coin in data:
-                    created_ms = coin.get("created_timestamp", 0) or 0
-                    if created_ms < today_start_ms:
-                        reached_yesterday = True
+                    # Use the appropriate timestamp for date filtering
+                    if only_graduated:
+                        ts_ms = coin.get("last_trade_timestamp", 0) or 0
+                    else:
+                        ts_ms = coin.get("created_timestamp", 0) or 0
+
+                    if ts_ms < today_start_ms:
+                        reached_cutoff = True
                         break
+
+                    graduated = bool(coin.get("complete", False))
+                    if only_graduated and not graduated:
+                        # Non-graduated token in the graduated sort — skip but keep paginating
+                        continue
 
                     mint = (coin.get("mint") or "").strip()
                     if not mint:
@@ -226,10 +252,7 @@ async def _fetch_via_api(
                     if usd_mc < min_usd_market_cap:
                         continue
 
-                    graduated = bool(coin.get("complete", False))
-                    if only_graduated and not graduated:
-                        continue
-
+                    created_ms = coin.get("created_timestamp", 0) or 0
                     tokens.append(PumpToken(
                         mint=mint,
                         name=coin.get("name", "") or "",
@@ -240,7 +263,7 @@ async def _fetch_via_api(
                         complete=graduated,
                     ))
 
-                if reached_yesterday or len(data) < _PAGE_SIZE:
+                if reached_cutoff or len(data) < _PAGE_SIZE:
                     break
 
                 offset += _PAGE_SIZE

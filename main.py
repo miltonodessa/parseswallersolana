@@ -168,8 +168,13 @@ async def run_pump_today(
     sol_price = await fetch_sol_price()
     migration_usd = migration_threshold_usd(sol_price) if sol_price else 0.0
 
-    print(f"\n[*] Загружаю токены pump.fun созданные сегодня ({today_str} UTC)...")
-    print(f"[*] Режим: {'только мигрированные (bonding curve complete)' if only_migrated else 'все токены'}")
+    mode_label = (
+        f"мигрированные сегодня (last_trade_timestamp ≥ {today_str})"
+        if only_migrated else
+        f"все созданные сегодня (created_timestamp ≥ {today_str})"
+    )
+    print(f"\n[*] Загружаю токены pump.fun — {mode_label} UTC...")
+    print(f"[*] Режим: {'только мигрированные' if only_migrated else 'все токены (включая не мигрированные)'}")
     if sol_price:
         print(f"[*] SOL цена   : ${sol_price:,.2f}")
         print(f"[*] Порог миграции: ~${migration_usd:,.0f} USD  (85 SOL × ${sol_price:.2f} × 4.8)")
