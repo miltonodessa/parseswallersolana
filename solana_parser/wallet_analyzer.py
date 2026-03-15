@@ -151,6 +151,7 @@ class WalletStats:
     tokens_total: int = 0            # distinct tokens traded
     trades_per_week: float = 0.0
     closed_positions: int = 0        # tokens with both buy AND sell recorded
+    appearances_count: int = 1       # how many of the scanned migrated tokens this wallet held
 
     # Internals
     tokens_traded: list[str] = field(default_factory=list)
@@ -176,6 +177,7 @@ class WalletStats:
             "sol_balance": round(self.sol_balance, 4),
             "tokens_total": self.tokens_total,
             "trades_per_week": round(self.trades_per_week, 2),
+            "appearances_count": self.appearances_count,
             "score": round(self.score, 2),
         }
 
@@ -538,20 +540,28 @@ class WalletAnalyzer:
     def _compute_score(self, stats: WalletStats) -> float:
         """
         Composite smart-wallet score 0–100.
-        Weights mirror Froggy v2 priority: WR > ROI > balance > frequency > tokens.
-        """
-        if stats.total_trades < settings.MIN_TOTAL_TRADES:
-            return 0.0
 
-        wr_score    = min(stats.win_rate, 100) * 0.30
-        roi_score   = min(max(stats.roi, 0), 500) / 500 * 100 * 0.30
-        bal_score   = min(stats.sol_balance / 10, 1) * 100 * 0.15
-        freq_score  = min(stats.trades_per_week / 7, 1) * 100 * 0.15
-        tok_score   = min(stats.tokens_total / 20, 1) * 100 * 0.10
+        Primary signal (50%): appearances_count — how many of today's migrated tokens
+        this wallet held. This is an on-chain fact, far more reliable than ROI/WR
+        computed from a limited transaction window.
+
+        Secondary signals (50%): balance, trade frequency, token diversity, WR/ROI
+        as weak supporting indicators.
+        """
+        # appearances_count: 5+ tokens = max score; normalize to 0-100
+        appear_score = min(stats.appearances_count / 5, 1.0) * 100 * 0.50
+
+        # Supporting signals
+        bal_score   = min(stats.sol_balance / 10, 1.0) * 100 * 0.20
+        freq_score  = min(stats.trades_per_week / 7, 1.0) * 100 * 0.15
+        tok_score   = min(stats.tokens_total / 20, 1.0) * 100 * 0.10
+        # ROI/WR from Helius are approximate — use as weak tie-breaker only
+        wr_score    = min(stats.win_rate, 100) * 0.025
+        roi_score   = min(max(stats.roi, 0), 500) / 500 * 100 * 0.025
 
         # Penalties
         fast_penalty = max(0, stats.fast_trades_pct - 15) * 2
         smtb_penalty = max(0, stats.smtb_pct - 10) * 2
 
-        raw = wr_score + roi_score + bal_score + freq_score + tok_score
+        raw = appear_score + bal_score + freq_score + tok_score + wr_score + roi_score
         return max(0.0, raw - fast_penalty - smtb_penalty)

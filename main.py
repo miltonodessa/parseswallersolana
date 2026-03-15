@@ -40,6 +40,7 @@ async def _analyze_and_export(
     rpc: SolanaRPCClient,
     prefix: str,
     label: str = "",
+    appearances: dict = None,
 ):
     """Анализирует список кошельков, применяет фильтры, сохраняет результаты."""
     analyzer = WalletAnalyzer(rpc)
@@ -99,8 +100,14 @@ async def _analyze_and_export(
     )
     print()
 
+    # Inject appearances counts (how many migrated tokens each wallet held)
+    if appearances:
+        for s in all_stats:
+            s.appearances_count = appearances.get(s.wallet, 1)
+
     filtered = [s for s in all_stats if analyzer.passes_filter(s, filters)]
-    filtered.sort(key=lambda x: x.score, reverse=True)
+    # Sort: appearances first (primary signal), then composite score
+    filtered.sort(key=lambda x: (x.appearances_count, x.score), reverse=True)
     print(f"\n[3/3] Смарт-кошельков: {len(filtered)} из {len(all_stats)}")
 
     if not filtered:
@@ -184,7 +191,8 @@ async def run_parse_tokens(mints: list[str]):
             return
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        await _analyze_and_export(wallets, rpc, prefix=f"tokens_{len(mints)}t_{ts}")
+        await _analyze_and_export(wallets, rpc, prefix=f"tokens_{len(mints)}t_{ts}",
+                                  appearances=appearances)
     finally:
         await rpc.close()
 
@@ -275,6 +283,7 @@ async def run_pump_today(
         await _analyze_and_export(
             wallets, rpc,
             prefix=f"pump_today_{today_str.replace('-', '')}",
+            appearances=appearances,
         )
     finally:
         await rpc.close()
@@ -397,7 +406,7 @@ def _print_filter_diagnostics(stats_list, filters):
         return
     total = len(stats_list)
     keys = ["roi", "win_rate", "fast_trades", "smtb", "balance", "tokens_total",
-            "trades_per_week", "total_trades"]
+            "trades_per_week", "total_trades", "closed_positions"]
     labels = {
         "roi":             f"ROI ≥ {filters.min_roi}%",
         "win_rate":        f"WinRate ≥ {filters.min_winrate}%",
@@ -407,6 +416,7 @@ def _print_filter_diagnostics(stats_list, filters):
         "tokens_total":    f"Tokens ≥ {filters.min_tokens_total}",
         "trades_per_week": f"Частота ≥ {filters.min_trades_per_week}/нед",
         "total_trades":    f"Сделок ≥ {filters.min_total_trades}",
+        "closed_positions": f"ЗакрытыхПоз ≥ {filters.min_closed_trades}",
     }
     fail_counts = {k: 0 for k in keys}
     for s in stats_list:
@@ -436,7 +446,7 @@ def _print_filter_diagnostics(stats_list, filters):
 
 def _print_table(stats_list):
     header = (
-        f"  {'Кошелёк':<46} {'ROI%':>7} {'WR%':>6} {'Fast%':>6} "
+        f"  {'Кошелёк':<46} {'Appear':>6} {'ROI%':>7} {'WR%':>6} {'Fast%':>6} "
         f"{'SMTB%':>6} {'SOL':>6} {'Tokens':>7} {'Freq/w':>7} {'Score':>6}"
     )
     print(header)
@@ -444,6 +454,7 @@ def _print_table(stats_list):
     for s in stats_list:
         print(
             f"  {s.wallet:<46} "
+            f"{s.appearances_count:>6} "
             f"{s.roi:>6.1f}% "
             f"{s.win_rate:>5.1f}% "
             f"{s.fast_trades_pct:>5.1f}% "
