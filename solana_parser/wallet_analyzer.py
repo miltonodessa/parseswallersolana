@@ -33,16 +33,21 @@ FAST_TRADE_THRESHOLD_SEC = 180  # < 3 minutes = fast/suspicious trade
 def _sol_from_swap_side(native: dict, tokens: list) -> float:
     """
     Extract total SOL lamports from one side of a Helius swap event.
-    Sums native SOL + any wSOL tokens (both denominated in lamports / raw units).
+
+    Native SOL and wSOL represent the *same* funds in Jupiter routes —
+    Helius often emits both nativeInput/nativeOutput AND a wSOL entry in
+    tokenInputs/tokenOutputs for the identical lamport amount.  Adding them
+    together would double-count.  So we take whichever is larger.
     Returns SOL as a float (already converted from lamports).
     """
-    lamports = float((native or {}).get("amount", 0) or 0)
+    native_lamps = float((native or {}).get("amount", 0) or 0)
+    wsol_lamps = 0.0
     for tok in tokens:
         if tok.get("mint") == _WSOL_MINT:
             raw = tok.get("rawTokenAmount") or {}
-            # wSOL has 9 decimals, same as native SOL
-            lamports += float(raw.get("tokenAmount", 0) or 0)
-    return lamports / 1e9
+            wsol_lamps += float(raw.get("tokenAmount", 0) or 0)
+    # Use max to avoid double-counting when both represent the same flow
+    return max(native_lamps, wsol_lamps) / 1e9
 
 
 def _real_tokens(token_list: list) -> list:
