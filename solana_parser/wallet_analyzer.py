@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # Wrapped SOL mint — Jupiter often routes through wSOL instead of native SOL.
 # Transactions using wSOL appear as tokenInputs/tokenOutputs, NOT nativeInput/nativeOutput.
 _WSOL_MINT = "So11111111111111111111111111111111111111112"
+FAST_TRADE_THRESHOLD_SEC = 180  # < 3 minutes = fast/suspicious trade
 
 
 def _sol_from_swap_side(native: dict, tokens: list) -> float:
