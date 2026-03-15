@@ -218,16 +218,22 @@ class WalletFilters:
         if self.min_tokens_total is None:  self.min_tokens_total = settings.MIN_TOKENS_TOTAL
         if self.min_trades_per_week is None: self.min_trades_per_week = settings.MIN_TRADES_PER_WEEK
         if self.min_total_trades is None:  self.min_total_trades = settings.MIN_TOTAL_TRADES
-        if self.min_closed_trades is None: self.min_closed_trades = getattr(settings, "MIN_CLOSED_TRADES", 5)
+        if self.min_closed_trades is None: self.min_closed_trades = getattr(settings, "MIN_CLOSED_TRADES", 0)
 
     def describe(self) -> str:
-        return (
-            f"ROI≥{self.min_roi}%  WR≥{self.min_winrate}%  "
-            f"FastTrades≤{self.max_fast_trades_pct}%  SMTB≤{self.max_smtb_pct}%  "
-            f"Balance≥{self.min_balance_sol}SOL  Tokens≥{self.min_tokens_total}  "
-            f"Freq≥{self.min_trades_per_week}/wk  Trades≥{self.min_total_trades}  "
-            f"ClosedPos≥{self.min_closed_trades}"
-        )
+        parts = [
+            f"FastTrades≤{self.max_fast_trades_pct}%",
+            f"SMTB≤{self.max_smtb_pct}%",
+            f"Balance≥{self.min_balance_sol}SOL",
+        ]
+        # Only include zero-able filters when they're actually active
+        if self.min_roi > 0:        parts.append(f"ROI≥{self.min_roi}%")
+        if self.min_winrate > 0:    parts.append(f"WR≥{self.min_winrate}%")
+        if self.min_tokens_total > 0: parts.append(f"Tokens≥{self.min_tokens_total}")
+        if self.min_trades_per_week > 0: parts.append(f"Freq≥{self.min_trades_per_week}/wk")
+        if self.min_total_trades > 0: parts.append(f"Trades≥{self.min_total_trades}")
+        if self.min_closed_trades > 0: parts.append(f"ClosedPos≥{self.min_closed_trades}")
+        return "  ".join(parts)
 
 
 class WalletAnalyzer:
