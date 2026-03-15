@@ -150,6 +150,7 @@ class WalletStats:
     sol_balance: float = 0.0
     tokens_total: int = 0            # distinct tokens traded
     trades_per_week: float = 0.0
+    closed_positions: int = 0        # tokens with both buy AND sell recorded
 
     # Internals
     tokens_traded: list[str] = field(default_factory=list)
@@ -189,6 +190,7 @@ class WalletStats:
             "tokens_total": self.tokens_total >= filters.min_tokens_total,
             "trades_per_week": self.trades_per_week >= filters.min_trades_per_week,
             "total_trades": self.total_trades >= filters.min_total_trades,
+            "closed_positions": self.closed_positions >= filters.min_closed_trades,
         }
 
 
@@ -203,6 +205,7 @@ class WalletFilters:
     min_tokens_total: int = None
     min_trades_per_week: float = None
     min_total_trades: int = None
+    min_closed_trades: int = None   # min positions with both buy AND sell recorded
 
     def __post_init__(self):
         if self.min_roi is None:           self.min_roi = settings.MIN_ROI
@@ -213,13 +216,15 @@ class WalletFilters:
         if self.min_tokens_total is None:  self.min_tokens_total = settings.MIN_TOKENS_TOTAL
         if self.min_trades_per_week is None: self.min_trades_per_week = settings.MIN_TRADES_PER_WEEK
         if self.min_total_trades is None:  self.min_total_trades = settings.MIN_TOTAL_TRADES
+        if self.min_closed_trades is None: self.min_closed_trades = getattr(settings, "MIN_CLOSED_TRADES", 5)
 
     def describe(self) -> str:
         return (
             f"ROI≥{self.min_roi}%  WR≥{self.min_winrate}%  "
             f"FastTrades≤{self.max_fast_trades_pct}%  SMTB≤{self.max_smtb_pct}%  "
             f"Balance≥{self.min_balance_sol}SOL  Tokens≥{self.min_tokens_total}  "
-            f"Freq≥{self.min_trades_per_week}/wk  Trades≥{self.min_total_trades}"
+            f"Freq≥{self.min_trades_per_week}/wk  Trades≥{self.min_total_trades}  "
+            f"ClosedPos≥{self.min_closed_trades}"
         )
 
 
@@ -468,6 +473,7 @@ class WalletAnalyzer:
 
         # total_trades = all unique token positions (bought or sold)
         stats.total_trades = total_positions
+        stats.closed_positions = closed_positions
 
         # WR and fast-trade % over CLOSED positions only
         if closed_positions > 0:
